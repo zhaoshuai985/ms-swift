@@ -2003,7 +2003,8 @@ def preprocess_science_qa(dataset: DATASET_TYPE):
     kwargs = {}
     if not isinstance(dataset, HfIterableDataset):
         kwargs['load_from_cache_file'] = dataset_enable_cache
-    return dataset.map(preprocess_row, **kwargs).filter(lambda row: row['image']).rename_columns({'image': 'images'})
+    # return dataset.map(preprocess_row, **kwargs).filter(lambda row: row['image']).rename_columns({'image': 'images'})
+    return dataset.map(preprocess_row, **kwargs).rename_columns({'image': 'images'})
 
 
 register_dataset(

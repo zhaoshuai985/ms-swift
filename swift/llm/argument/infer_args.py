@@ -1,7 +1,7 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 import datetime as dt
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Optional, Union
 
 import torch
@@ -112,6 +112,14 @@ class InferArguments(MergeArguments, VllmArguments, LmdeployArguments, BaseArgum
         max_batch_size (int): Maximum batch size for the pt engine. Default is 1.
         val_dataset_sample (Optional[int]): Sample size for validation dataset. Default is None.
     """
+    model: Optional[str] = field(
+        default=None,
+        metadata={"help": "Model name or path"}
+    )
+    prompt_template: Optional[str] = field(
+        default=None,
+        metadata={"help": "Template to be appended to each user query"}
+    )
     infer_backend: Literal['vllm', 'pt', 'lmdeploy'] = 'pt'
 
     result_path: Optional[str] = None
@@ -122,6 +130,15 @@ class InferArguments(MergeArguments, VllmArguments, LmdeployArguments, BaseArgum
 
     # only for inference
     val_dataset_sample: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        BaseArguments.__post_init__(self)
+        # MergeArguments.__post_init__(self)
+        VllmArguments.__post_init__(self)
+        self._init_result_path('infer_result')
+        self._init_eval_human()
+        self._init_stream()
+        self._init_pt_ddp()
 
     def _get_result_path(self, folder_name: str) -> str:
         result_dir = self.ckpt_dir or f'result/{self.model_suffix}'
@@ -159,13 +176,13 @@ class InferArguments(MergeArguments, VllmArguments, LmdeployArguments, BaseArgum
                     self.ddp_backend = 'gloo'
             dist.init_process_group(backend=self.ddp_backend)
 
-    def __post_init__(self) -> None:
-        BaseArguments.__post_init__(self)
-        VllmArguments.__post_init__(self)
-        self._init_result_path('infer_result')
-        self._init_eval_human()
-        self._init_stream()
-        self._init_pt_ddp()
+    # def __post_init__(self) -> None:
+    #     BaseArguments.__post_init__(self)
+    #     VllmArguments.__post_init__(self)
+    #     self._init_result_path('infer_result')
+    #     self._init_eval_human()
+    #     self._init_stream()
+    #     self._init_pt_ddp()
 
     def _init_eval_human(self):
         if len(self.dataset) == 0 and len(self.val_dataset) == 0:

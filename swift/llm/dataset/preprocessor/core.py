@@ -235,11 +235,11 @@ class RowPreprocessor:
 
     @staticmethod
     def remove_useless_columns(dataset: DATASET_TYPE) -> DATASET_TYPE:
-        dataset = RowPreprocessor.get_features_dataset(dataset)
-        features = dataset.features
-        k_list = [k for k in RowPreprocessor.standard_keys if k in features]
-        if len(k_list) != len(features):
-            dataset = dataset.select_columns(k_list)
+        # dataset = RowPreprocessor.get_features_dataset(dataset)
+        # features = dataset.features
+        # k_list = [k for k in RowPreprocessor.standard_keys if k in features]
+        # if len(k_list) != len(features):
+        #     dataset = dataset.select_columns(k_list)
         return dataset
 
     @staticmethod

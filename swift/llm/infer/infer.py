@@ -40,6 +40,9 @@ class SwiftInfer(SwiftPipeline):
             self.template = args.get_template(self.processor)
         self.random_state = np.random.RandomState(args.data_seed)
 
+        # Store prompt template from args
+        self.prompt_template = args.prompt_template
+
     def __getattr__(self, key: str):
         try:
             return super().__getattr__(key)
@@ -195,8 +198,21 @@ class SwiftInfer(SwiftPipeline):
         logger.info(f'val_dataset: {val_dataset}')
         result_list = []
         self.infer_kwargs['metrics'] = [InferStats()]
+
+        # Only append prompt template if it's provided
+        if self.prompt_template:
+            for data in val_dataset:
+                if 'messages' in data and len(data['messages']) > 0:
+                    user_message = data['messages'][0]
+                    if user_message['role'] == 'user':
+                        concatenated_content = user_message['content'] + '\n\n' + self.prompt_template
+                        user_message['content'] = concatenated_content
+                        print('\n' + concatenated_content + '\n\n')
+
         if request_config and request_config.stream:
             for data in val_dataset:
+                # 保存原始输入数据的副本
+                output_data = {k: v for k, v in data.items()}
                 labels = InferRequest.remove_response(data['messages'])
                 query = data['messages'][-1]['content']
                 print(f'[QUERY] {query}')
@@ -204,10 +220,32 @@ class SwiftInfer(SwiftPipeline):
                     print(f'[LABELS] {labels}')
                 print('[RESPONSE] ', end='')
                 response = self.infer_single(data, request_config)
-                data = {'response': response, 'labels': labels, **data}
-                result_list.append(data)
+                # data = {'response': response, 'labels': labels, **data}
+                # result_list.append(data)
+
+                # 将response添加到messages中
+                messages = output_data['messages'].copy()
+                messages.append({"role": "assistant", "content": response})
+                
+                # 创建有序字典，包含所有需要的字段
+                ordered_data = {
+                    'qid': output_data['qid'],
+                    'answer': output_data.get('answer', labels),
+                    'messages': messages,
+                    # 'response': response,
+                    # 'labels': labels
+                }
+                
+                # 添加其他字段，保持原有顺序
+                for k, v in output_data.items():
+                    if k not in ordered_data:
+                        ordered_data[k] = v
+                        
+                result_list.append(ordered_data)
+
                 if self.jsonl_writer:
-                    self.jsonl_writer.append(data)
+                    # self.jsonl_writer.append(data)
+                    self.jsonl_writer.append(ordered_data)
         else:
             is_dist = args.global_world_size > 1 and dist.is_initialized()
             if is_dist:
@@ -226,16 +264,41 @@ class SwiftInfer(SwiftPipeline):
             resp_list = self.infer(
                 val_dataset, request_config, template=self.template, use_tqdm=True, **self.infer_kwargs)
             for data, resp, labels in zip(val_dataset, resp_list, labels_list):
+                # 保存原始输入数据的副本
+                output_data = {k: v for k, v in data.items()}
                 response = resp.choices[0].message.content
-                data = {'response': response, 'labels': labels, 'logprobs': resp.choices[0].logprobs, **data}
-                result_list.append(data)
+                # data = {'response': response, 'labels': labels, 'logprobs': resp.choices[0].logprobs, **data}
+                # result_list.append(data)
+
+                # 将response添加到messages中
+                messages = output_data['messages'].copy()
+                messages.append({"role": "assistant", "content": response})
+                
+                # 创建有序字典，包含所有需要的字段
+                ordered_data = {
+                    'qid': output_data['qid'],
+                    'answer': output_data.get('answer', labels),
+                    'messages': messages,
+                    # 'response': response,
+                    # 'labels': labels,
+                    # 'logprobs': resp.choices[0].logprobs
+                }
+                
+                # 添加其他字段，保持原有顺序
+                for k, v in output_data.items():
+                    if k not in ordered_data:
+                        ordered_data[k] = v
+                        
+                result_list.append(ordered_data)
+                if self.jsonl_writer:
+                    self.jsonl_writer.append(ordered_data)
             if is_dist:
                 total_result_list = [None for _ in range(args.global_world_size)] if args.rank == 0 else None
                 dist.gather_object(result_list, total_result_list)
                 result_list = total_result_list and list(chain.from_iterable(total_result_list))
 
-            if is_master() and self.jsonl_writer and result_list:
-                self.jsonl_writer.append(result_list)
+            # if is_master() and self.jsonl_writer and result_list:
+            #     self.jsonl_writer.append(result_list)
         metrics = self.infer_kwargs.pop('metrics')
         print(f'[rank{args.rank}] {metrics[0].compute()}')
         if args.metric is not None:

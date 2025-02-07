@@ -247,7 +247,7 @@
 # CUDA_VISIBLE_DEVICES=0 swift infer --model OpenGVLab/Mini-InternVL-Chat-4B-V1-5 --val_dataset /home/civisky/workspace/datasets/vqarad/vqarad_test_all.jsonl --max_new_tokens 1024 --attn_impl flash_attn --system "You are an expert in medical image analysis. Analyze the image and provide a concise answer. NO explanations."
 # CUDA_VISIBLE_DEVICES=0 swift infer --model OpenGVLab/Mini-InternVL-Chat-2B-V1-5 --val_dataset /home/civisky/workspace/datasets/vqarad/vqarad_test_all.jsonl --max_new_tokens 1024 --attn_impl flash_attn --system "You are an expert in medical image analysis. Analyze the image and provide a concise answer. NO explanations."
 # CUDA_VISIBLE_DEVICES=0 swift infer --model Qwen/Qwen2-VL-2B-Instruct --val_dataset /home/civisky/workspace/datasets/vqarad/vqarad_test_all.jsonl --max_new_tokens 1024 --attn_impl flash_attn --system "You are an expert in medical image analysis. Analyze the image and provide a concise answer. NO explanations."
-CUDA_VISIBLE_DEVICES=0 swift infer --model Qwen/Qwen2.5-VL-3B-Instruct --val_dataset /home/civisky/workspace/datasets/vqarad/vqarad_test_all.jsonl --max_new_tokens 1024 --attn_impl flash_attn --system "You are an expert in medical image analysis. Analyze the image and provide a concise answer. NO explanations."
+CUDA_VISIBLE_DEVICES=0 swift infer --model Qwen/Qwen2.5-VL-7B-Instruct --val_dataset /home/civisky/workspace/datasets/vqarad/vqarad_test_all.jsonl --max_new_tokens 1024 --attn_impl flash_attn --system "You are an expert in medical image analysis. Analyze the image and provide a concise answer. NO explanations."
 
 
 

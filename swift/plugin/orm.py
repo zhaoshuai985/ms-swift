@@ -395,10 +395,44 @@ class SoftOverlong(ORM):
         return rewards
 
 
+class SmartAccuracy(ORM):
+    """
+    Simple and reliable accuracy reward function for chart/visual QA tasks.
+    Extracts answers from <answer></answer> tags and performs direct string comparison.
+    Perfect for numerical answers from chart analysis tasks.
+    """
+
+    def __call__(self, completions, solution, **kwargs) -> List[float]:
+        rewards = []
+        
+        for content, sol in zip(completions, solution):
+            reward = 0.0
+            
+            try:
+                # Extract answer from solution if it has <answer></answer> tags
+                sol_match = re.search(r'<answer>(.*?)</answer>', sol)
+                ground_truth = sol_match.group(1).strip() if sol_match else sol.strip()
+
+                # Extract answer from content if it has <answer></answer> tags  
+                content_match = re.search(r'<answer>(.*?)</answer>', content)
+                student_answer = content_match.group(1).strip() if content_match else content.strip()
+
+                # Direct string comparison - simple and reliable for numerical answers
+                if student_answer == ground_truth:
+                    reward = 1.0
+                    
+            except Exception:
+                reward = 0.0  # Keep as 0.0 if extraction fails
+                    
+            rewards.append(reward)
+        return rewards
+
+
 orms = {
     'toolbench': ReactORM,
     'math': MathORM,
     'accuracy': MathAccuracy,
+    'smart_accuracy': SmartAccuracy,
     'format': Format,
     'react_format': ReActFormat,
     'cosine': CosineReward,

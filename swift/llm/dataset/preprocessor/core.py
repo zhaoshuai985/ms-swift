@@ -245,12 +245,16 @@ class RowPreprocessor:
 
     @staticmethod
     def remove_useless_columns(dataset: DATASET_TYPE) -> DATASET_TYPE:
-        dataset = RowPreprocessor.get_features_dataset(dataset)
-        features = dataset.features
-        k_list = [k for k in RowPreprocessor.standard_keys if k in features]
-        if len(k_list) != len(features):
-            dataset = dataset.select_columns(k_list)
+        # 保留所有列，不删除任何字段，以便在推理时保留原始数据的所有信息
+        # 这样可以在输出时将额外字段保存到meta中
         return dataset
+        # 原始实现（会删除非标准字段）：
+        # dataset = RowPreprocessor.get_features_dataset(dataset)
+        # features = dataset.features
+        # k_list = [k for k in RowPreprocessor.standard_keys if k in features]
+        # if len(k_list) != len(features):
+        #     dataset = dataset.select_columns(k_list)
+        # return dataset
 
     @staticmethod
     @contextmanager

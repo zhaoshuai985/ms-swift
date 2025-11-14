@@ -417,8 +417,8 @@ class SmartAccuracy(ORM):
                 content_match = re.search(r'<answer>(.*?)</answer>', content)
                 student_answer = content_match.group(1).strip() if content_match else content.strip()
 
-                # Direct string comparison - simple and reliable for numerical answers
-                if student_answer == ground_truth:
+                # Case-insensitive string comparison - handles variations like "Yes" vs "yes"
+                if student_answer.lower() == ground_truth.lower():
                     reward = 1.0
                     
             except Exception:

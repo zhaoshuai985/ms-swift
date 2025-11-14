@@ -27,6 +27,40 @@ def save_jsonl(data, file_path):
         for sample in data:
             f.write(json.dumps(sample, ensure_ascii=False) + '\n')
 
+def extract_answer_from_content(content):
+    """
+    智能提取答案，兼容多种格式。
+    
+    支持格式：
+    1. <answer>...</answer> 标签格式（GRPO训练输出）
+    2. 纯文本格式（旧格式）
+    
+    Args:
+        content: assistant的回复内容
+    
+    Returns:
+        提取的答案字符串
+    
+    Examples:
+        >>> extract_answer_from_content("Yes")
+        "Yes"
+        >>> extract_answer_from_content("<answer>Yes</answer>")
+        "Yes"
+        >>> extract_answer_from_content("<think>...</think>\\n<answer>Yes</answer>")
+        "Yes"
+    """
+    # 1. 尝试从 <answer> 标签提取
+    match = re.search(r'<answer>(.*?)</answer>', content, re.DOTALL | re.IGNORECASE)
+    if match:
+        answer = match.group(1).strip()
+        # 如果答案是多行的，只取第一行（通常答案应该是简短的）
+        if '\n' in answer:
+            answer = answer.split('\n')[0].strip()
+        return answer
+    
+    # 2. 回退：没有标签，使用第一行（兼容旧格式）
+    return content.split('\n')[0].strip()
+
 def extract_answers(sample):
     """Extract ground truth and predicted answers from a sample."""
     true_answer = sample.get("answer", "").strip()
@@ -34,10 +68,9 @@ def extract_answers(sample):
     pred_answer = ""
     for msg in messages:
         if msg.get("role") == "assistant":
-            # pred_answer = msg.get("content", "").strip()
             content = msg.get("content", "").strip()
-            # Extract only the first part before potential extra info (like caption, etc.)
-            pred_answer = content.split('\n')[0].strip()
+            # 智能提取答案（支持标签格式和纯文本格式）
+            pred_answer = extract_answer_from_content(content)
             break
     if not true_answer or not pred_answer:
         print(f"Warning: Missing answer in sample qid={sample.get('qid', 'unknown')}")

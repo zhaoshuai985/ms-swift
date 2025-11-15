@@ -428,11 +428,110 @@ class SmartAccuracy(ORM):
         return rewards
 
 
+class AnswerMatch(ORM):
+    """
+    Exact answer matching for VQA tasks.
+    Matches model-generated answers against ground truth answers with case-insensitive comparison.
+    Supports extracting answers from <answer></answer> tags in model completions.
+    """
+
+    def __call__(self, completions, answer, **kwargs) -> List[float]:
+        rewards = []
+        
+        for content, ground_truth in zip(completions, answer):
+            reward = 0.0
+            
+            try:
+                # Ground truth answer is directly from the dataset annotation
+                ground_truth = ground_truth.strip()
+
+                # Extract answer from completion if it has <answer></answer> tags  
+                content_match = re.search(r'<answer>(.*?)</answer>', content)
+                predicted_answer = content_match.group(1).strip() if content_match else content.strip()
+
+                # Case-insensitive string comparison - handles variations like "Yes" vs "yes"
+                if predicted_answer.lower() == ground_truth.lower():
+                    reward = 1.0
+                    
+            except Exception:
+                reward = 0.0  # Keep as 0.0 if extraction fails
+                    
+            rewards.append(reward)
+        return rewards
+
+
+class PlaneMatch(ORM):
+    """
+    Exact image plane matching for medical imaging tasks.
+    Matches model-identified image planes against ground truth image planes with case-insensitive comparison.
+    Supports extracting plane from <plane></plane> tags in model completions.
+    """
+
+    def __call__(self, completions, image_plane, **kwargs) -> List[float]:
+        rewards = []
+        
+        for content, ground_truth in zip(completions, image_plane):
+            reward = 0.0
+            
+            try:
+                # Ground truth plane is directly from the dataset annotation
+                ground_truth = ground_truth.strip()
+
+                # Extract plane from completion if it has <plane></plane> tags  
+                content_match = re.search(r'<plane>(.*?)</plane>', content)
+                predicted_plane = content_match.group(1).strip() if content_match else ''
+
+                # Case-insensitive string comparison for plane matching
+                if predicted_plane and predicted_plane.lower() == ground_truth.lower():
+                    reward = 1.0
+                    
+            except Exception:
+                reward = 0.0  # Keep as 0.0 if extraction fails
+                    
+            rewards.append(reward)
+        return rewards
+
+
+class ModalityMatch(ORM):
+    """
+    Exact imaging modality matching for medical imaging tasks.
+    Matches model-identified modalities against ground truth modalities with case-insensitive comparison.
+    Supports extracting modality from <modality></modality> tags in model completions.
+    """
+
+    def __call__(self, completions, image_modality, **kwargs) -> List[float]:
+        rewards = []
+        
+        for content, ground_truth in zip(completions, image_modality):
+            reward = 0.0
+            
+            try:
+                # Ground truth modality is directly from the dataset annotation
+                ground_truth = ground_truth.strip()
+
+                # Extract modality from completion if it has <modality></modality> tags  
+                content_match = re.search(r'<modality>(.*?)</modality>', content)
+                predicted_modality = content_match.group(1).strip() if content_match else ''
+
+                # Case-insensitive string comparison for modality matching
+                if predicted_modality and predicted_modality.lower() == ground_truth.lower():
+                    reward = 1.0
+                    
+            except Exception:
+                reward = 0.0  # Keep as 0.0 if extraction fails
+                    
+            rewards.append(reward)
+        return rewards
+
+
 orms = {
     'toolbench': ReactORM,
     'math': MathORM,
     'accuracy': MathAccuracy,
     'smart_accuracy': SmartAccuracy,
+    'answer_match': AnswerMatch,
+    'plane_match': PlaneMatch,
+    'modality_match': ModalityMatch,
     'format': Format,
     'react_format': ReActFormat,
     'cosine': CosineReward,

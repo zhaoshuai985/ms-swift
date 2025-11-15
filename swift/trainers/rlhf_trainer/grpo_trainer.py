@@ -842,6 +842,14 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         if self.template.truncation_strategy == 'raise':
             inputs = self.resample_encode_failed_inputs(inputs)
 
+        # Extract image_plane and image_modality from medpix to top level for reward functions
+        for inp in inputs:
+            if 'medpix' in inp:
+                if 'image_plane' not in inp and 'image_plane' in inp['medpix']:
+                    inp['image_plane'] = inp['medpix']['image_plane']
+                if 'image_modality' not in inp and 'image_modality' in inp['medpix']:
+                    inp['image_modality'] = inp['medpix']['image_modality']
+
         inputs = self._generate_completions(inputs)
         total_rewards_per_func = self._score_completions(inputs)
         mode = 'train' if self.model.training else 'eval'
@@ -887,6 +895,17 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
 
             if all('solution' in inp for inp in inputs):
                 metrics_for_logs_to_gather['solution'] = [inp['solution'] for inp in inputs]
+
+            if all('answer' in inp for inp in inputs):
+                metrics_for_logs_to_gather['answer'] = [inp['answer'] for inp in inputs]
+
+            # Extract image_plane from medpix if available
+            if all('medpix' in inp and 'image_plane' in inp['medpix'] for inp in inputs):
+                metrics_for_logs_to_gather['image_plane'] = [inp['medpix']['image_plane'] for inp in inputs]
+
+            # Extract image_modality from medpix if available
+            if all('medpix' in inp and 'image_modality' in inp['medpix'] for inp in inputs):
+                metrics_for_logs_to_gather['image_modality'] = [inp['medpix']['image_modality'] for inp in inputs]
 
             if all('rollout_infos' in inp and 'num_turns' in inp['rollout_infos'] for inp in inputs):
                 metrics_for_logs_to_gather['num_turns'] = [inp['rollout_infos']['num_turns'] for inp in inputs]

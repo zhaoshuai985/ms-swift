@@ -51,6 +51,10 @@ class GKDConfig(SwiftArgumentsMixin, HfGKDConfig):
 @dataclass
 class GRPOConfig(GRPOArgumentsMixin, SwiftArgumentsMixin, HfGRPOConfig):
     stop_words: List[str] = field(default_factory=list)
+    # CaptionAlignment reward function parameters
+    model_name: Optional[str] = None  # Sentence-BERT model for caption alignment
+    threshold: Optional[float] = None  # Similarity threshold for caption alignment
+    smooth_reward: Optional[bool] = None  # Whether to use smooth rewards for caption alignment
 
     def __post_init__(self):
         GRPOArgumentsMixin.__post_init__(self)

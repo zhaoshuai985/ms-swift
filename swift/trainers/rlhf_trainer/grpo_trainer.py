@@ -118,15 +118,21 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         if reward_funcs:
             for i, reward_func in enumerate(reward_funcs):
                 if reward_func in orms:
-                    reward_func_class = orms[reward_func]
-                    reward_func_args = list(inspect.signature(reward_func_class.__init__).parameters)
-                    reward_func_kwargs = {
-                        key: getattr(args, key)
-                        for key in reward_func_args if key not in ['self', 'args', 'kwargs'] and hasattr(args, key)
-                    }
-                    if 'tokenizer' in reward_func_args:
-                        reward_func_kwargs['tokenizer'] = self.processing_class
-                    reward_funcs[i] = reward_func_class(**reward_func_kwargs)
+                    reward_func_obj = orms[reward_func]
+                    # Check if it's already an instance (e.g., CaptionAlignment())
+                    if inspect.isclass(reward_func_obj):
+                        # It's a class, so instantiate it
+                        reward_func_args = list(inspect.signature(reward_func_obj.__init__).parameters)
+                        reward_func_kwargs = {
+                            key: getattr(args, key)
+                            for key in reward_func_args if key not in ['self', 'args', 'kwargs'] and hasattr(args, key)
+                        }
+                        if 'tokenizer' in reward_func_args:
+                            reward_func_kwargs['tokenizer'] = self.processing_class
+                        reward_funcs[i] = reward_func_obj(**reward_func_kwargs)
+                    else:
+                        # It's already an instance, use it directly
+                        reward_funcs[i] = reward_func_obj
                 elif not callable(reward_func):
                     raise ValueError(f'reward_function {reward_func} is not implemented in swift.plugin')
 

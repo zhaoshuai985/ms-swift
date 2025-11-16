@@ -586,6 +586,9 @@ class CaptionAlignment(ORM):
         """
         Calculate caption alignment rewards.
         
+        Extracts model-generated caption from <caption></caption> tags in completions,
+        then compares with ground-truth image_caption using cosine similarity.
+        
         Args:
             completions: Model-generated completions (List[str])
             image_caption: Ground-truth image captions (List[str])
@@ -600,13 +603,24 @@ class CaptionAlignment(ORM):
             return [0.0] * len(completions)
         
         try:
-            # Batch encode both completions and captions
-            completion_embeddings = self.model.encode(
-                completions,
+            # Extract captions from <caption></caption> tags in completions
+            # If no tags found, use the entire completion as fallback
+            extracted_captions = []
+            for content in completions:
+                caption_match = re.search(r'<caption>(.*?)</caption>', content, re.DOTALL)
+                if caption_match:
+                    extracted_captions.append(caption_match.group(1).strip())
+                else:
+                    # Fallback: use entire completion if no caption tags found
+                    extracted_captions.append(content.strip())
+            
+            # Batch encode both extracted captions and ground-truth captions
+            caption_embeddings = self.model.encode(
+                extracted_captions,
                 convert_to_tensor=False,
                 show_progress_bar=False
             )
-            caption_embeddings = self.model.encode(
+            gt_caption_embeddings = self.model.encode(
                 image_caption,
                 convert_to_tensor=False,
                 show_progress_bar=False
@@ -616,8 +630,8 @@ class CaptionAlignment(ORM):
             from sklearn.metrics.pairwise import cosine_similarity
             
             similarities = cosine_similarity(
-                completion_embeddings,
-                caption_embeddings
+                caption_embeddings,
+                gt_caption_embeddings
             ).diagonal()
             
             # Convert similarities to rewards
@@ -653,7 +667,7 @@ orms = {
     'answer_match': AnswerMatch,
     'plane_match': PlaneMatch,
     'modality_match': ModalityMatch,
-    'caption_alignment': CaptionAlignment,
+    'caption_alignment': CaptionAlignment(),  # Create instance with default parameters
     'format': Format,
     'react_format': ReActFormat,
     'cosine': CosineReward,

@@ -582,13 +582,13 @@ class CaptionAlignment(ORM):
         self.smooth_reward = smooth_reward
         self.model_name = model_name
     
-    def __call__(self, completions, image_captions, **kwargs) -> List[float]:
+    def __call__(self, completions, image_caption, **kwargs) -> List[float]:
         """
         Calculate caption alignment rewards.
         
         Args:
             completions: Model-generated completions (List[str])
-            image_captions: Ground-truth image captions (List[str])
+            image_caption: Ground-truth image captions (List[str])
             **kwargs: Additional arguments for compatibility
         
         Returns:
@@ -596,7 +596,7 @@ class CaptionAlignment(ORM):
         """
         rewards = []
         
-        if not completions or not image_captions:
+        if not completions or not image_caption:
             return [0.0] * len(completions)
         
         try:
@@ -607,7 +607,7 @@ class CaptionAlignment(ORM):
                 show_progress_bar=False
             )
             caption_embeddings = self.model.encode(
-                image_captions,
+                image_caption,
                 convert_to_tensor=False,
                 show_progress_bar=False
             )

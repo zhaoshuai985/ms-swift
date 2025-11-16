@@ -524,6 +524,127 @@ class ModalityMatch(ORM):
         return rewards
 
 
+class CaptionAlignment(ORM):
+    """
+    Image caption alignment reward function using Sentence-BERT.
+    
+    Measures semantic similarity between model-generated completion and 
+    ground-truth image caption using cosine similarity of sentence embeddings.
+    
+    Supports multiple embedding models for flexible experimentation.
+    
+    Example:
+        completion: "Multiple small infarcts in the MCA territory"
+        caption: "Multiple small infarcts showing reduced diffusion..."
+        similarity: 0.85 > 0.70 threshold → reward = 1.0
+    """
+    
+    def __init__(self, 
+                 model_name: str = "all-MiniLM-L6-v2",
+                 threshold: float = 0.70,
+                 smooth_reward: bool = True):
+        """
+        Initialize CaptionAlignment reward function.
+        
+        Args:
+            model_name: SentenceTransformer model name
+              - "all-MiniLM-L6-v2" (default, 22M, lightweight)
+              - "all-mpnet-base-v2" (109M, high quality)
+              - "pritamdeka/S-BioBERT-snli-multinli-stsb" (medical-specific)
+              - "dmis-lab/biobert-base-cased" (medical BioBERT)
+              - "allenai/scibert-base-uncased" (scientific papers)
+              - "allenai/specter" (academic citations)
+              - Others available for experimentation
+            threshold: Similarity threshold (0-1)
+              - 0.65: Aggressive, easier to get reward
+              - 0.70: Balanced (default, recommended)
+              - 0.75: Conservative, strict requirement
+            smooth_reward: Use smooth reward function
+              - True: reward = max(0, (similarity - threshold) * 2.0)
+              - False: reward = 1.0 if similarity > threshold else 0.0
+        """
+        try:
+            from sentence_transformers import SentenceTransformer
+            self.model = SentenceTransformer(model_name)
+            self.model_name = model_name
+        except ImportError:
+            raise ImportError(
+                "sentence-transformers not installed. "
+                "Run: pip install sentence-transformers"
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load model {model_name}: {e}. "
+                f"Check if model name is correct or download it first."
+            )
+        
+        self.threshold = threshold
+        self.smooth_reward = smooth_reward
+        self.model_name = model_name
+    
+    def __call__(self, completions, image_captions, **kwargs) -> List[float]:
+        """
+        Calculate caption alignment rewards.
+        
+        Args:
+            completions: Model-generated completions (List[str])
+            image_captions: Ground-truth image captions (List[str])
+            **kwargs: Additional arguments for compatibility
+        
+        Returns:
+            rewards: Reward scores (List[float], range 0-1)
+        """
+        rewards = []
+        
+        if not completions or not image_captions:
+            return [0.0] * len(completions)
+        
+        try:
+            # Batch encode both completions and captions
+            completion_embeddings = self.model.encode(
+                completions,
+                convert_to_tensor=False,
+                show_progress_bar=False
+            )
+            caption_embeddings = self.model.encode(
+                image_captions,
+                convert_to_tensor=False,
+                show_progress_bar=False
+            )
+            
+            # Calculate cosine similarity
+            from sklearn.metrics.pairwise import cosine_similarity
+            
+            similarities = cosine_similarity(
+                completion_embeddings,
+                caption_embeddings
+            ).diagonal()
+            
+            # Convert similarities to rewards
+            for sim in similarities:
+                sim_float = float(sim)
+                
+                if self.smooth_reward:
+                    # Smooth reward: gradual increase around threshold
+                    reward = max(0.0, (sim_float - self.threshold) * 2.0)
+                    reward = min(1.0, reward)  # Cap at 1.0
+                else:
+                    # Hard reward: 0 or 1
+                    reward = 1.0 if sim_float > self.threshold else 0.0
+                
+                rewards.append(reward)
+        
+        except Exception as e:
+            import logging
+            logging.warning(
+                f"CaptionAlignment calculation failed: {e}. "
+                f"Returning zero rewards."
+            )
+            return [0.0] * len(completions)
+        
+        return rewards
+
+
 orms = {
     'toolbench': ReactORM,
     'math': MathORM,
@@ -532,6 +653,7 @@ orms = {
     'answer_match': AnswerMatch,
     'plane_match': PlaneMatch,
     'modality_match': ModalityMatch,
+    'caption_alignment': CaptionAlignment,
     'format': Format,
     'react_format': ReActFormat,
     'cosine': CosineReward,

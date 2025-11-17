@@ -284,7 +284,8 @@ class Format(ORM):
 
     def __call__(self, completions, **kwargs) -> List[float]:
         """Reward function that checks if the completion has a specific format."""
-        pattern = r'^<think>.*?</think>\s*<answer>.*?</answer>(?![\s\S])'
+        # pattern = r'^<think>.*?</think>\s*<answer>.*?</answer>(?![\s\S])'
+        pattern = r'^<think>.*?</think>\s*<answer>.*?</answer>\s*<plane>.*?</plane>\s*<modality>.*?</modality>\s*<caption>.*?</caption>(?![\s\S])'
         matches = [re.match(pattern, content, re.DOTALL | re.MULTILINE) for content in completions]
         return [1.0 if match else 0.0 for match in matches]
 
@@ -428,11 +429,14 @@ class SmartAccuracy(ORM):
         return rewards
 
 
-class AnswerMatch(ORM):
+class AnswerMatchString(ORM):
     """
-    Exact answer matching for VQA tasks.
+    Exact string-based answer matching for VQA tasks.
     Matches model-generated answers against ground truth answers with case-insensitive comparison.
     Supports extracting answers from <answer></answer> tags in model completions.
+    
+    Best for: Closed-set answers (yes/no, fixed vocabularies)
+    Method: Direct string comparison after normalization
     """
 
     def __call__(self, completions, answer, **kwargs) -> List[float]:
@@ -460,11 +464,167 @@ class AnswerMatch(ORM):
         return rewards
 
 
-class PlaneMatch(ORM):
+class AnswerMatchCosine(ORM):
     """
-    Exact image plane matching for medical imaging tasks.
+    BERT-based semantic answer matching for VQA tasks using cosine similarity.
+    
+    Handles both closed-set (yes/no, medical terms) and open-set answers 
+    using Sentence-BERT semantic similarity with normalized text comparison.
+    
+    Key features:
+    - Normalizes answers (lowercase + strip) before comparison
+    - Handles case-insensitive matching (Yes/YES/yes all treated equally)
+    - Supports both exact and semantic matches
+    - Smooth reward function for gradual feedback
+    
+    Example:
+        prediction: "Yes"
+        ground_truth: "yes"
+        → normalized: "yes" vs "yes"
+        → similarity: 1.0 > 0.80 threshold → reward = 1.0
+        
+        prediction: "multiple small infarcts in mca"
+        ground_truth: "multiple infarcts showing mca"
+        → normalized and compared
+        → similarity: ~0.88 > 0.80 threshold → reward = 1.0
+    """
+    
+    def __init__(self, 
+                 model_name: str = "pritamdeka/S-BioBERT-snli-multinli-stsb",
+                 threshold: float = 0.80,
+                 smooth_reward: bool = True):
+        """
+        Initialize AnswerMatchCosine reward function.
+        
+        Args:
+            model_name: SentenceTransformer model name
+              - "pritamdeka/S-BioBERT-snli-multinli-stsb" (medical-specific, default)
+              - "all-MiniLM-L6-v2" (lightweight, general purpose)
+              - "all-mpnet-base-v2" (high quality, general purpose)
+            threshold: Cosine similarity threshold (0-1)
+              - 0.75: More lenient, accepts more paraphrases
+              - 0.80: Balanced (default, recommended for medical VQA)
+              - 0.85: Conservative, stricter semantic matching
+            smooth_reward: Use smooth reward function
+              - True: reward = max(0, (similarity - threshold) * 10), capped at 1.0
+              - False: reward = 1.0 if similarity > threshold else 0.0
+        """
+        try:
+            from sentence_transformers import SentenceTransformer
+            self.model = SentenceTransformer(model_name)
+            self.model_name = model_name
+        except ImportError:
+            raise ImportError(
+                "sentence-transformers not installed. "
+                "Run: pip install sentence-transformers"
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load model {model_name}: {e}. "
+                f"Check if model name is correct or download it first."
+            )
+        
+        self.threshold = threshold
+        self.smooth_reward = smooth_reward
+    
+    def _normalize_answer(self, text: str) -> str:
+        """
+        Normalize answer text: lowercase + strip whitespace.
+        
+        This ensures case-insensitive comparison while preserving semantic meaning.
+        """
+        return text.lower().strip()
+    
+    def __call__(self, completions, answer, **kwargs) -> List[float]:
+        """
+        Calculate semantic answer matching rewards using cosine similarity.
+        
+        Extracts model-generated answer from <answer></answer> tags in completions,
+        normalizes both predicted and ground-truth answers, then compares using 
+        BERT embeddings and cosine similarity.
+        
+        Args:
+            completions: Model-generated completions (List[str])
+            answer: Ground-truth answers (List[str])
+            **kwargs: Additional arguments for compatibility
+        
+        Returns:
+            rewards: Reward scores (List[float], range 0-1)
+        """
+        rewards = []
+        
+        if not completions or not answer:
+            return [0.0] * len(completions)
+        
+        try:
+            # Extract and normalize answers from <answer></answer> tags in completions
+            extracted_answers = []
+            for content in completions:
+                answer_match = re.search(r'<answer>(.*?)</answer>', content, re.DOTALL)
+                if answer_match:
+                    extracted_answers.append(
+                        self._normalize_answer(answer_match.group(1))
+                    )
+                else:
+                    # Fallback: use entire completion if no answer tags found
+                    extracted_answers.append(self._normalize_answer(content))
+            
+            # Normalize ground truth answers
+            normalized_gts = [self._normalize_answer(ans) for ans in answer]
+            
+            # Batch encode both extracted and ground-truth answers
+            answer_embeddings = self.model.encode(
+                extracted_answers,
+                convert_to_tensor=False,
+                show_progress_bar=False
+            )
+            gt_embeddings = self.model.encode(
+                normalized_gts,
+                convert_to_tensor=False,
+                show_progress_bar=False
+            )
+            
+            # Calculate cosine similarity
+            from sklearn.metrics.pairwise import cosine_similarity
+            
+            similarities = cosine_similarity(
+                answer_embeddings,
+                gt_embeddings
+            ).diagonal()
+            
+            # Convert similarities to rewards
+            for sim in similarities:
+                sim_float = float(sim)
+                
+                if self.smooth_reward:
+                    # Smooth reward: gradual increase around threshold
+                    reward = max(0.0, (sim_float - self.threshold) * 10)
+                    reward = min(1.0, reward)  # Cap at 1.0
+                else:
+                    # Hard reward: 0 or 1
+                    reward = 1.0 if sim_float > self.threshold else 0.0
+                
+                rewards.append(reward)
+        
+        except Exception as e:
+            import logging
+            logging.warning(
+                f"AnswerMatchCosine calculation failed: {e}. "
+                f"Returning zero rewards."
+            )
+            return [0.0] * len(completions)
+        
+        return rewards
+
+
+class PlaneMatchString(ORM):
+    """
+    Exact string-based image plane matching for medical imaging tasks.
     Matches model-identified image planes against ground truth image planes with case-insensitive comparison.
     Supports extracting plane from <plane></plane> tags in model completions.
+    
+    Best for: Closed-set medical plane vocabulary (axial, pa, sagittal, etc.)
+    Method: Direct string comparison after normalization
     """
 
     def __call__(self, completions, image_plane, **kwargs) -> List[float]:
@@ -492,11 +652,14 @@ class PlaneMatch(ORM):
         return rewards
 
 
-class ModalityMatch(ORM):
+class ModalityMatchString(ORM):
     """
-    Exact imaging modality matching for medical imaging tasks.
+    Exact string-based imaging modality matching for medical imaging tasks.
     Matches model-identified modalities against ground truth modalities with case-insensitive comparison.
     Supports extracting modality from <modality></modality> tags in model completions.
+    
+    Best for: Closed-set medical modality vocabulary (CT, X-ray, MRI, DWI, T1, T2, FLAIR, etc.)
+    Method: Direct string comparison after normalization
     """
 
     def __call__(self, completions, image_modality, **kwargs) -> List[float]:
@@ -524,14 +687,16 @@ class ModalityMatch(ORM):
         return rewards
 
 
-class CaptionAlignment(ORM):
+class CaptionMatchCosine(ORM):
     """
-    Image caption alignment reward function using Sentence-BERT.
+    BERT-based semantic caption matching using cosine similarity.
     
     Measures semantic similarity between model-generated completion and 
     ground-truth image caption using cosine similarity of sentence embeddings.
     
     Supports multiple embedding models for flexible experimentation.
+    Best for: Open-set caption descriptions, semantic matching
+    Method: BERT embeddings + cosine similarity
     
     Example:
         completion: "Multiple small infarcts in the MCA territory"
@@ -664,10 +829,11 @@ orms = {
     'math': MathORM,
     'accuracy': MathAccuracy,
     'smart_accuracy': SmartAccuracy,
-    'answer_match': AnswerMatch,
-    'plane_match': PlaneMatch,
-    'modality_match': ModalityMatch,
-    'caption_alignment': CaptionAlignment(),  # Create instance with default parameters
+    'answer_match_string': AnswerMatchString,
+    'answer_match_cosine': AnswerMatchCosine(model_name="pritamdeka/S-BioBERT-snli-multinli-stsb", threshold=0.80, smooth_reward=True),
+    'plane_match_string': PlaneMatchString,
+    'modality_match_string': ModalityMatchString,
+    'caption_match_cosine': CaptionMatchCosine(model_name="pritamdeka/S-BioBERT-snli-multinli-stsb", threshold=0.50, smooth_reward=True),
     'format': Format,
     'react_format': ReActFormat,
     'cosine': CosineReward,

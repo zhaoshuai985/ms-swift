@@ -491,7 +491,7 @@ class AnswerMatchCosine(ORM):
     
     def __init__(self, 
                  model_name: str = "pritamdeka/S-BioBERT-snli-multinli-stsb",
-                 threshold: float = 0.80,
+                 threshold: float = 0.70,
                  smooth_reward: bool = True):
         """
         Initialize AnswerMatchCosine reward function.
@@ -585,12 +585,13 @@ class AnswerMatchCosine(ORM):
             )
             
             # Calculate cosine similarity
+            # For each prediction, calculate similarity with corresponding ground truth
             from sklearn.metrics.pairwise import cosine_similarity
-            
-            similarities = cosine_similarity(
-                answer_embeddings,
-                gt_embeddings
-            ).diagonal()
+            similarities = []
+            for pred_emb, gt_emb in zip(answer_embeddings, gt_embeddings):
+                # Reshape to 2D for cosine_similarity
+                sim = cosine_similarity([pred_emb], [gt_emb])[0, 0]
+                similarities.append(sim)
             
             # Convert similarities to rewards
             for sim in similarities:
@@ -705,8 +706,8 @@ class CaptionMatchCosine(ORM):
     """
     
     def __init__(self, 
-                 model_name: str = "all-MiniLM-L6-v2",
-                 threshold: float = 0.70,
+                 model_name: str = "pritamdeka/S-BioBERT-snli-multinli-stsb",
+                 threshold: float = 0.40,
                  smooth_reward: bool = True):
         """
         Initialize CaptionAlignment reward function.
@@ -792,12 +793,13 @@ class CaptionMatchCosine(ORM):
             )
             
             # Calculate cosine similarity
+            # For each prediction, calculate similarity with corresponding ground truth
             from sklearn.metrics.pairwise import cosine_similarity
-            
-            similarities = cosine_similarity(
-                caption_embeddings,
-                gt_caption_embeddings
-            ).diagonal()
+            similarities = []
+            for pred_emb, gt_emb in zip(caption_embeddings, gt_caption_embeddings):
+                # Reshape to 2D for cosine_similarity
+                sim = cosine_similarity([pred_emb], [gt_emb])[0, 0]
+                similarities.append(sim)
             
             # Convert similarities to rewards
             for sim in similarities:
@@ -830,10 +832,10 @@ orms = {
     'accuracy': MathAccuracy,
     'smart_accuracy': SmartAccuracy,
     'answer_match_string': AnswerMatchString,
-    'answer_match_cosine': AnswerMatchCosine(model_name="pritamdeka/S-BioBERT-snli-multinli-stsb", threshold=0.80, smooth_reward=True),
+    'answer_match_cosine': AnswerMatchCosine(model_name="pritamdeka/S-BioBERT-snli-multinli-stsb", threshold=0.70, smooth_reward=True),
     'plane_match_string': PlaneMatchString,
     'modality_match_string': ModalityMatchString,
-    'caption_match_cosine': CaptionMatchCosine(model_name="pritamdeka/S-BioBERT-snli-multinli-stsb", threshold=0.50, smooth_reward=True),
+    'caption_match_cosine': CaptionMatchCosine(model_name="pritamdeka/S-BioBERT-snli-multinli-stsb", threshold=0.40, smooth_reward=True),
     'format': Format,
     'react_format': ReActFormat,
     'cosine': CosineReward,

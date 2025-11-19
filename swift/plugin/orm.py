@@ -509,23 +509,27 @@ class AnswerMatchCosine(ORM):
               - True: reward = max(0, (similarity - threshold) * 10), capped at 1.0
               - False: reward = 1.0 if similarity > threshold else 0.0
         """
-        try:
-            from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(model_name)
-            self.model_name = model_name
-        except ImportError:
-            raise ImportError(
-                "sentence-transformers not installed. "
-                "Run: pip install sentence-transformers"
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to load model {model_name}: {e}. "
-                f"Check if model name is correct or download it first."
-            )
-        
+        self.model_name = model_name
         self.threshold = threshold
         self.smooth_reward = smooth_reward
+        self.model = None
+    
+    def _load_model(self):
+        """Lazy load the SentenceTransformer model."""
+        if self.model is None:
+            try:
+                from sentence_transformers import SentenceTransformer
+                self.model = SentenceTransformer(self.model_name)
+            except ImportError:
+                raise ImportError(
+                    "sentence-transformers not installed. "
+                    "Run: pip install sentence-transformers"
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to load model {self.model_name}: {e}. "
+                    f"Check if model name is correct or download it first."
+                )
     
     def _normalize_answer(self, text: str) -> str:
         """
@@ -557,6 +561,9 @@ class AnswerMatchCosine(ORM):
             return [0.0] * len(completions)
         
         try:
+            # Lazy load model on first call
+            self._load_model()
+            
             # Extract and normalize answers from <answer></answer> tags in completions
             extracted_answers = []
             for content in completions:
@@ -729,24 +736,27 @@ class CaptionMatchCosine(ORM):
               - True: reward = max(0, (similarity - threshold) * 2.0)
               - False: reward = 1.0 if similarity > threshold else 0.0
         """
-        try:
-            from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(model_name)
-            self.model_name = model_name
-        except ImportError:
-            raise ImportError(
-                "sentence-transformers not installed. "
-                "Run: pip install sentence-transformers"
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to load model {model_name}: {e}. "
-                f"Check if model name is correct or download it first."
-            )
-        
+        self.model_name = model_name
         self.threshold = threshold
         self.smooth_reward = smooth_reward
-        self.model_name = model_name
+        self.model = None
+
+    def _load_model(self):
+        """Lazy load the SentenceTransformer model."""
+        if self.model is None:
+            try:
+                from sentence_transformers import SentenceTransformer
+                self.model = SentenceTransformer(self.model_name)
+            except ImportError:
+                raise ImportError(
+                    "sentence-transformers not installed. "
+                    "Run: pip install sentence-transformers"
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to load model {self.model_name}: {e}. "
+                    f"Check if model name is correct or download it first."
+                )
     
     def __call__(self, completions, image_caption, **kwargs) -> List[float]:
         """
@@ -769,6 +779,9 @@ class CaptionMatchCosine(ORM):
             return [0.0] * len(completions)
         
         try:
+            # Lazy load model on first call
+            self._load_model()
+
             # Extract captions from <caption></caption> tags in completions
             # If no tags found, use the entire completion as fallback
             extracted_captions = []

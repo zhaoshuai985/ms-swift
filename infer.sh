@@ -27,6 +27,32 @@
 # CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --system examples/train/grpo/prompt.txt --max_new_tokens 1024 --max_model_len 1024 --stream true --adapters /data/workspace/swift/output/v67-20251118-145317/checkpoint-9500
 # CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --system examples/train/grpo/prompt.txt --max_new_tokens 1024 --max_model_len 1024 --stream true --adapters /data/workspace/swift/output/v67-20251118-145317/checkpoint-10000
 # CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --system examples/train/grpo/prompt.txt --max_new_tokens 1024 --max_model_len 1024 --stream true --adapters /data/workspace/swift/output/v67-20251118-145317/checkpoint-6500
-
-
-
+# CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --system examples/train/grpo/prompt.txt --max_new_tokens 1024 --max_model_len 1024 --stream true --adapters /data/workspace/swift/output/v71-20251120-002734/checkpoint-1500
+# sleep 30s
+# CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --system examples/train/grpo/prompt.txt --max_new_tokens 1024 --max_model_len 1024 --stream true --adapters /data/workspace/swift/output/v71-20251120-002734/checkpoint-2000
+# sleep 30s
+# CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --system examples/train/grpo/prompt.txt --max_new_tokens 1024 --max_model_len 1024 --stream true --adapters /data/workspace/swift/output/v71-20251120-002734/checkpoint-2500
+# sleep 30s
+# CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --system examples/train/grpo/prompt.txt --max_new_tokens 1024 --max_model_len 1024 --stream true --adapters /data/workspace/swift/output/v71-20251120-002734/checkpoint-3000
+# sleep 30s
+# CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --system examples/train/grpo/prompt.txt --max_new_tokens 1024 --max_model_len 1024 --stream true --adapters /data/workspace/swift/output/v71-20251120-002734/checkpoint-3500
+# sleep 30s
+# CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --system examples/train/grpo/prompt.txt --max_new_tokens 1024 --max_model_len 1024 --stream true --adapters /data/workspace/swift/output/v71-20251120-002734/checkpoint-4000
+# sleep 30s
+# CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --system examples/train/grpo/prompt.txt --max_new_tokens 1024 --max_model_len 1024 --stream true --adapters /data/workspace/swift/output/v71-20251120-002734/checkpoint-5000
+# sleep 30s
+# CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --system examples/train/grpo/prompt.txt --max_new_tokens 1024 --max_model_len 1024 --stream true --adapters /data/workspace/swift/output/v71-20251120-002734/checkpoint-6000
+# CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --system examples/train/grpo/prompt.txt --max_new_tokens 512 --max_model_len 1024 --stream true --adapters /data/workspace/swift/output/v96-20251122-181946/checkpoint-4000
+# sleep 30s
+# CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --system examples/train/grpo/prompt.txt --max_new_tokens 512 --max_model_len 1024 --stream true --adapters /data/workspace/swift/output/v96-20251122-181946/checkpoint-5000
+# sleep 30s
+# CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --system examples/train/grpo/prompt.txt --max_new_tokens 512 --max_model_len 1024 --stream true --adapters /data/workspace/swift/output/v96-20251122-181946/checkpoint-6000
+# sleep 30s
+CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/.archive/vqarad_test_251123.jsonl --system /data/workspace/swift/prompt2.txt --max_new_tokens 512 --stream true --adapters /data/workspace/swift/output/v97-20251124-020444/checkpoint-5500
+sleep 30s
+CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/.archive/vqarad_test_251123.jsonl --system /data/workspace/swift/prompt2.txt --max_new_tokens 512 --stream true --adapters /data/workspace/swift/output/v97-20251124-020444/checkpoint-6000
+sleep 30s
+CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --system /data/workspace/swift/prompt2.txt --max_new_tokens 512 --stream true --adapters /data/workspace/swift/output/v97-20251124-020444/checkpoint-5500
+sleep 30s
+CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --system /data/workspace/swift/prompt2.txt --max_new_tokens 512 --stream true --adapters /data/workspace/swift/output/v97-20251124-020444/checkpoint-6000
+sleep 30s

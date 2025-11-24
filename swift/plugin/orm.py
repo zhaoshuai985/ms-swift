@@ -285,7 +285,9 @@ class Format(ORM):
     def __call__(self, completions, **kwargs) -> List[float]:
         """Reward function that checks if the completion has a specific format."""
         # pattern = r'^<think>.*?</think>\s*<answer>.*?</answer>(?![\s\S])'
-        pattern = r'^<think>.*?</think>\s*<answer>.*?</answer>\s*<plane>.*?</plane>\s*<modality>.*?</modality>\s*<caption>.*?</caption>(?![\s\S])'
+        # pattern = r'^<think>.*?</think>\s*<answer>.*?</answer>\s*<plane>.*?</plane>\s*<modality>.*?</modality>\s*<title>.*?</title>\s*<caption>.*?</caption>(?![\s\S])'
+        # pattern = r'^<think>.*?</think>\s*<plane>.*?</plane>\s*<modality>.*?</modality>\s*<title>.*?</title>\s*<caption>.*?</caption>\s*<answer>.*?</answer>(?![\s\S])'
+        pattern = r'^<plane>.*?</plane>\s*<modality>.*?</modality>\s*<title>.*?</title>\s*<caption>.*?</caption>\s*<think>.*?</think>\s*<answer>.*?</answer>(?![\s\S])'
         matches = [re.match(pattern, content, re.DOTALL | re.MULTILINE) for content in completions]
         return [1.0 if match else 0.0 for match in matches]
 
@@ -839,6 +841,123 @@ class CaptionMatchCosine(ORM):
         return rewards
 
 
+class TitleMatchCosine(ORM):
+    """
+    BERT-based semantic title matching using cosine similarity.
+    
+    Measures semantic similarity between model-generated completion and 
+    ground-truth image title using cosine similarity of sentence embeddings.
+    
+    Supports extracting title from <title></title> tags in model completions.
+    
+    Best for: Medical diagnosis matching, high-level summary
+    Method: BERT embeddings + cosine similarity
+    """
+    
+    def __init__(self, 
+                 model_name: str = "pritamdeka/S-BioBERT-snli-multinli-stsb",
+                 threshold: float = 0.60,
+                 smooth_reward: bool = True):
+        """
+        Initialize TitleMatchCosine reward function.
+        
+        Args:
+            model_name: SentenceTransformer model name
+            threshold: Similarity threshold (0-1)
+            smooth_reward: Use smooth reward function
+        """
+        self.model_name = model_name
+        self.threshold = threshold
+        self.smooth_reward = smooth_reward
+        self.model = None
+
+    def _load_model(self):
+        """Lazy load the SentenceTransformer model."""
+        if self.model is None:
+            try:
+                from sentence_transformers import SentenceTransformer
+                self.model = SentenceTransformer(self.model_name)
+            except ImportError:
+                raise ImportError(
+                    "sentence-transformers not installed. "
+                    "Run: pip install sentence-transformers"
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to load model {self.model_name}: {e}. "
+                    f"Check if model name is correct or download it first."
+                )
+    
+    def __call__(self, completions, image_title, **kwargs) -> List[float]:
+        """
+        Calculate title alignment rewards.
+        
+        Extracts model-generated title from <title></title> tags in completions,
+        then compares with ground-truth image_title using cosine similarity.
+        """
+        rewards = []
+        
+        if not completions or not image_title:
+            return [0.0] * len(completions)
+        
+        try:
+            # Lazy load model on first call
+            self._load_model()
+
+            # Extract titles from <title></title> tags in completions
+            # If no tags found, use the entire completion as fallback
+            extracted_titles = []
+            for content in completions:
+                title_match = re.search(r'<title>(.*?)</title>', content, re.DOTALL)
+                if title_match:
+                    extracted_titles.append(title_match.group(1).strip())
+                else:
+                    # Fallback: use entire completion if no title tags found
+                    extracted_titles.append(content.strip())
+            
+            # Batch encode both extracted titles and ground-truth titles
+            title_embeddings = self.model.encode(
+                extracted_titles,
+                convert_to_tensor=False,
+                show_progress_bar=False
+            )
+            gt_title_embeddings = self.model.encode(
+                image_title,
+                convert_to_tensor=False,
+                show_progress_bar=False
+            )
+            
+            # Calculate cosine similarity
+            from sklearn.metrics.pairwise import cosine_similarity
+            similarities = []
+            for pred_emb, gt_emb in zip(title_embeddings, gt_title_embeddings):
+                sim = cosine_similarity([pred_emb], [gt_emb])[0, 0]
+                similarities.append(sim)
+            
+            # Convert similarities to rewards
+            for sim in similarities:
+                sim_float = float(sim)
+                
+                if self.smooth_reward:
+                    # Smooth reward: gradual increase around threshold
+                    reward = max(0.0, (sim_float - self.threshold) * 5.0) # Steeper slope for titles
+                    reward = min(1.0, reward)
+                else:
+                    reward = 1.0 if sim_float > self.threshold else 0.0
+                
+                rewards.append(reward)
+        
+        except Exception as e:
+            import logging
+            logging.warning(
+                f"TitleMatchCosine calculation failed: {e}. "
+                f"Returning zero rewards."
+            )
+            return [0.0] * len(completions)
+        
+        return rewards
+
+
 orms = {
     'toolbench': ReactORM,
     'math': MathORM,
@@ -849,6 +968,7 @@ orms = {
     'plane_match_string': PlaneMatchString,
     'modality_match_string': ModalityMatchString,
     'caption_match_cosine': CaptionMatchCosine(model_name="pritamdeka/S-BioBERT-snli-multinli-stsb", threshold=0.40, smooth_reward=True),
+    'title_match_cosine': TitleMatchCosine(model_name="pritamdeka/S-BioBERT-snli-multinli-stsb", threshold=0.40, smooth_reward=True),
     'format': Format,
     'react_format': ReActFormat,
     'cosine': CosineReward,

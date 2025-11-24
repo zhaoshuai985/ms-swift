@@ -857,6 +857,8 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                     inp['image_modality'] = inp['medpix']['image_modality']
                 if 'image_caption' not in inp and 'image_caption' in inp['medpix']:
                     inp['image_caption'] = inp['medpix']['image_caption']
+                if 'image_title' not in inp and 'image_title' in inp['medpix']:
+                    inp['image_title'] = inp['medpix']['image_title']
 
         inputs = self._generate_completions(inputs)
         total_rewards_per_func = self._score_completions(inputs)
@@ -918,6 +920,10 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             # Extract image_caption from top level (already extracted from medpix in _generate_and_score_completions)
             if all('image_caption' in inp for inp in inputs):
                 metrics_for_logs_to_gather['image_caption'] = [inp['image_caption'] for inp in inputs]
+
+            # Extract image_title from top level (already extracted from medpix in _generate_and_score_completions)
+            if all('image_title' in inp for inp in inputs):
+                metrics_for_logs_to_gather['image_title'] = [inp['image_title'] for inp in inputs]
 
             if all('rollout_infos' in inp and 'num_turns' in inp['rollout_infos'] for inp in inputs):
                 metrics_for_logs_to_gather['num_turns'] = [inp['rollout_infos']['num_turns'] for inp in inputs]

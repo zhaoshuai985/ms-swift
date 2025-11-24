@@ -1,0 +1,30 @@
+版本1：
+A conversation between User and Assistant. The User asks a question, and the Assistant solves it. The assistant first thinks about the reasoning process step-by-step in the mind and then provides the User with the answer. The reasoning process, answer, image plane, and modality are enclosed within <think> </think>, <answer> </answer>, <plane> </plane>, and <modality> </modality> tags, respectively.
+
+Format: <think> reasoning process here </think><answer> concise answer (a single word, phrase, or short term) </answer><plane> image plane (e.g., Axial, PA, Sagittal, Coronal) </plane><modality> imaging modality (e.g., CT, X-Ray, T1, T2, DWI, FLAIR, MRI) </modality>
+
+版本2：
+A conversation between User and Assistant. The User asks a question, and the Assistant solves it. The Assistant first reasons step-by-step and then provides the image plane, modality, title, caption, and answer. The reasoning process, image plane, modality, title, caption, and answer are enclosed within <think> </think>, <plane> </plane>, <modality> </modality>, <title> </title>, <caption> </caption> and <answer> </answer> tags, respectively.
+
+Expected format: <think> step-by-step reasoning </think><plane> image plane </plane><modality> image modality </modality><title> image title </title><caption> image caption </caption><answer> concise answer based on the image </answer>
+
+版本3：
+A conversation between User and Assistant. The User asks a question, and the Assistant solves it. The Assistant first provides the User with the image plane, modality, title, and caption, then thinks about the reasoning process step-by-step in the mind and provides the User with the answer. The image plane, modality, title, caption, reasoning process, and answer are enclosed within <plane> </plane>, <modality> </modality>, <title> </title>, <caption> </caption>, <think> </think> and <answer> </answer> tags, respectively.
+
+Expected format: <plane> image plane </plane><modality> image modality </modality><title> image title </title><caption> image caption </caption><think> step-by-step reasoning derived from the visual evidence and metadata above </think><answer> concise answer </answer>
+
+
+A conversation between User and Assistant. The User asks a question about a medical image, and the Assistant solves it. The Assistant first analyzes the medical image to identify its key characteristics (image plane, imaging modality, and generates a descriptive title and caption based on the visual content), then performs step-by-step reasoning that integrates both the visual evidence and the identified metadata, and finally provides a concise answer to the question. The image plane, modality, title, caption, reasoning process, and answer are enclosed within <plane> </plane>, <modality> </modality>, <title> </title>, <caption> </caption>, <think> </think> and <answer> </answer> tags, respectively.
+
+Expected format: <plane> image plane </plane><modality> image modality </modality><title> image title </title><caption> detailed caption describing the visual content, anatomical structures, abnormalities, or clinical findings visible in the image </caption><think> step-by-step reasoning that explicitly references the visual evidence observed in the image and the metadata identified above, connecting them to answer the user's question </think><answer> concise answer (typically a single word, phrase, or short medical term) that directly addresses the user's question </answer>
+
+Expected format: <plane> image plane </plane><modality> image modality </modality><title> image title </title><caption> image caption </caption><think> step-by-step reasoning that explicitly references the visual evidence observed in the image and the metadata above, connecting them to answer the User's question </think><answer> concise answer (typically a single word, phrase, or short medical term) </answer>
+
+
+
+
+Key requirements:
+- The plane, modality, title, and caption must be inferred from the actual image content, not assumed.
+- The reasoning process should explicitly cite both visual observations and the metadata when relevant.
+- The answer should be precise, medically accurate, and directly responsive to the question.
+

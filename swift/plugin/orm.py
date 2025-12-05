@@ -285,71 +285,11 @@ class Format(ORM):
     def __call__(self, completions, **kwargs) -> List[float]:
         """Reward function that checks if the completion has a specific format."""
         # pattern = r'^<think>.*?</think>\s*<answer>.*?</answer>(?![\s\S])'
-        # pattern = r'^<think>.*?</think>\s*<answer>.*?</answer>\s*<plane>.*?</plane>\s*<modality>.*?</modality>\s*<title>.*?</title>\s*<caption>.*?</caption>(?![\s\S])'
+        pattern = r'^<think>.*?</think>\s*<answer>.*?</answer>\s*<plane>.*?</plane>\s*<modality>.*?</modality>\s*<title>.*?</title>\s*<caption>.*?</caption>(?![\s\S])'
         # pattern = r'^<think>.*?</think>\s*<plane>.*?</plane>\s*<modality>.*?</modality>\s*<title>.*?</title>\s*<caption>.*?</caption>\s*<answer>.*?</answer>(?![\s\S])'
-        pattern = r'^<plane>.*?</plane>\s*<modality>.*?</modality>\s*<title>.*?</title>\s*<caption>.*?</caption>\s*<think>.*?</think>\s*<answer>.*?</answer>(?![\s\S])'
+        # pattern = r'^<plane>.*?</plane>\s*<modality>.*?</modality>\s*<title>.*?</title>\s*<caption>.*?</caption>\s*<think>.*?</think>\s*<answer>.*?</answer>(?![\s\S])'
         matches = [re.match(pattern, content, re.DOTALL | re.MULTILINE) for content in completions]
-        
-        rewards = []
-        for i, match in enumerate(matches):
-            if not match:
-                rewards.append(0.0)
-                continue
-            
-            # Format check passed, now check consistency between Final Answer and <answer>
-            content = completions[i]
-            
-            # Extract <think> content
-            reasoning_match = re.search(r'<think>(.*?)</think>', content, re.DOTALL)
-            if not reasoning_match:
-                rewards.append(0.0)
-                continue
-            
-            reasoning_text = reasoning_match.group(1)
-            
-            # Extract "Final Answer:" text (take the last occurrence if multiple)
-            # Match "Final Answer:" followed by text until newline or end of string
-            final_answer_pattern = r'Final Answer:\s*(.+?)(?=\n|$)'
-            final_answer_matches = re.findall(final_answer_pattern, reasoning_text, re.IGNORECASE | re.MULTILINE)
-            if not final_answer_matches:
-                rewards.append(0.0)
-                continue
-            
-            # Take the last occurrence
-            final_answer_text = final_answer_matches[-1].strip()
-            
-            # Extract <answer> tag content
-            answer_match = re.search(r'<answer>(.*?)</answer>', content, re.DOTALL)
-            if not answer_match:
-                rewards.append(0.0)
-                continue
-            
-            answer_text = answer_match.group(1).strip()
-            
-            # Normalize both texts: handle whitespace/hyphen variations, lowercase, remove trailing punctuation
-            def normalize_text(text):
-                text = text.strip()
-                # Normalize hyphens to spaces: all hyphens (with or without surrounding spaces) become single space
-                # This makes "XR - Plain Film", "XR-Plain Film", and "XR Plain Film" all equivalent
-                # First, normalize hyphen with spaces around it: " - " -> " "
-                text = re.sub(r'\s*-\s*', ' ', text)
-                # Normalize multiple consecutive whitespace to single space
-                text = re.sub(r'\s+', ' ', text)
-                text = text.lower()
-                # Remove trailing punctuation (.,;:!?)
-                text = re.sub(r'[.,;:!?]+$', '', text)
-                return text.strip()
-            
-            normalized_final_answer = normalize_text(final_answer_text)
-            normalized_answer = normalize_text(answer_text)
-            
-            # Check consistency
-            if normalized_final_answer == normalized_answer:
-                rewards.append(1.0)
-            else:
-                rewards.append(0.0)
-        
-        return rewards
+        return [1.0 if match else 0.0 for match in matches]
 
 
 class ReActFormat(ORM):
@@ -1024,11 +964,11 @@ orms = {
     'accuracy': MathAccuracy,
     'smart_accuracy': SmartAccuracy,
     'answer_match_string': AnswerMatchString,
-    'answer_match_cosine': AnswerMatchCosine(model_name="pritamdeka/S-BioBERT-snli-multinli-stsb", threshold=0.70, smooth_reward=True),
+    'answer_match_cosine': AnswerMatchCosine(model_name="pritamdeka/S-BioBERT-snli-multinli-stsb", threshold=0.50, smooth_reward=True),
     'plane_match_string': PlaneMatchString,
     'modality_match_string': ModalityMatchString,
-    'caption_match_cosine': CaptionMatchCosine(model_name="pritamdeka/S-BioBERT-snli-multinli-stsb", threshold=0.40, smooth_reward=True),
-    'title_match_cosine': TitleMatchCosine(model_name="pritamdeka/S-BioBERT-snli-multinli-stsb", threshold=0.40, smooth_reward=True),
+    'caption_match_cosine': CaptionMatchCosine(model_name="pritamdeka/S-BioBERT-snli-multinli-stsb", threshold=0.30, smooth_reward=True),
+    'title_match_cosine': TitleMatchCosine(model_name="pritamdeka/S-BioBERT-snli-multinli-stsb", threshold=0.30, smooth_reward=True),
     'format': Format,
     'react_format': ReActFormat,
     'cosine': CosineReward,

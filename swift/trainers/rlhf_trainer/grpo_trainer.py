@@ -887,6 +887,149 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         if self.args.dynamic_sample and mode == 'train':
             # dynamic sampling for std=0 groups
             inputs, total_rewards_per_func = self._dynamic_sampling(inputs, total_rewards_per_func)  # noqa
+
+        # --- Golden Truth Injection ---
+        # Detect groups with 0 AnswerMatchCosine reward and inject golden answer to prevent gradient vanishing
+        # Note: We skip this in dynamic_sample mode as it already handles zero-reward groups differently
+        injection_enabled = mode == 'train' and not self.args.dynamic_sample
+        if injection_enabled:
+            # 1. Identify zero-reward groups
+            # Check AnswerMatchCosine (first reward function, index 0) for each sample
+            # This is the main accuracy reward - if it's 0 for all 8 generations, we need to inject
+            answer_match_rewards = total_rewards_per_func[:, 0]  # Shape: [num_samples]
+            # Reshape to [num_groups, num_generations]
+            grouped_answer_rewards = answer_match_rewards.view(-1, self.num_generations)
+            # Find groups where ALL AnswerMatchCosine rewards are 0 (sum == 0 means all are 0)
+            zero_groups_indices = (grouped_answer_rewards.sum(dim=1) == 0).nonzero(as_tuple=True)[0]
+            
+            if len(zero_groups_indices) > 0:
+                logger.info(f"Golden Truth Injection: Found {len(zero_groups_indices)} zero-reward groups (AnswerMatchCosine all 0). Injecting golden answers...")
+                
+                for group_idx in zero_groups_indices:
+                    # Calculate start index of this group in the flattened inputs list
+                    start_idx = group_idx.item() * self.num_generations
+                    # We will replace the LAST sample in this group (index 7 if num_generations=8)
+                    target_idx = start_idx + self.num_generations - 1
+                    
+                    # Ensure target_idx is within bounds
+                    if target_idx >= len(inputs):
+                        logger.warning(f"Golden Truth Injection: target_idx {target_idx} >= len(inputs) {len(inputs)}, skipping")
+                        continue
+                    
+                    target_input = inputs[target_idx]
+                    
+                    # 2. Extract Ground Truth Data
+                    # 'answer' is required. Other fields are optional but recommended for better format.
+                    if 'answer' not in target_input:
+                        logger.warning(f"Golden Truth Injection: No 'answer' field in target_input at idx {target_idx}, skipping")
+                        continue
+                        
+                    gold_answer = target_input['answer']
+                    # Handle if answer is a list (though logs showed it might be consistent string in inputs)
+                    if isinstance(gold_answer, list):
+                        gold_answer = gold_answer[0] if gold_answer else "Unknown"
+                    
+                    # Extract other metadata for format reconstruction
+                    gold_caption = target_input.get('image_caption', '') or target_input.get('medpix', {}).get('image_caption', '')
+                    gold_title = target_input.get('image_title', '') or target_input.get('medpix', {}).get('image_title', '')
+                    gold_plane = target_input.get('image_plane', '') or target_input.get('medpix', {}).get('image_plane', '')
+                    gold_modality = target_input.get('image_modality', '') or target_input.get('medpix', {}).get('image_modality', '')
+                    
+                    # Clean up data (remove potential list wrapping)
+                    if isinstance(gold_caption, list): gold_caption = gold_caption[0] if gold_caption else ''
+                    if isinstance(gold_title, list): gold_title = gold_title[0] if gold_title else ''
+                    if isinstance(gold_plane, list): gold_plane = gold_plane[0] if gold_plane else ''
+                    if isinstance(gold_modality, list): gold_modality = gold_modality[0] if gold_modality else ''
+
+                    # 3. Construct Golden Response
+                    # Format according to prompt7.txt:
+                    # <think> reasoning process </think>
+                    # <plane> image plane </plane>
+                    # <modality> imaging modality </modality>
+                    # <title> image title </title>
+                    # <caption> image caption </caption>
+                    # <answer> final answer </answer>
+                    # We use caption as a proxy for reasoning to make <think> meaningful
+                    reasoning_content = f"Based on the image, {gold_caption}" if gold_caption else "Based on the image analysis, I can identify the relevant features to answer the question."
+                    
+                    # Ensure all fields have default values if missing
+                    gold_plane = gold_plane or "Unknown"
+                    gold_modality = gold_modality or "Unknown"
+                    gold_title = gold_title or "Unknown"
+                    gold_caption = gold_caption or "Unknown"
+                    
+                    golden_response = (
+                        f"<think> {reasoning_content} </think>"
+                        f"<plane> {gold_plane} </plane>"
+                        f"<modality> {gold_modality} </modality>"
+                        f"<title> {gold_title} </title>"
+                        f"<caption> {gold_caption} </caption>"
+                        f"<answer> {gold_answer} </answer>"
+                    )
+                    
+                    # 4. Inject into Inputs
+                    # Replace the generated content with golden response
+                    # Note: content can be str, list (token_ids), or dict (with token_ids/loss_scale)
+                    # We replace it with the golden response string, which will be re-encoded later by template.encode
+                    # IMPORTANT: Directly modify inputs[target_idx] to ensure the change persists
+                    old_content = inputs[target_idx]['messages'][-1]['content']
+                    inputs[target_idx]['messages'][-1]['content'] = golden_response
+                    
+                    # CRITICAL: Remove response_token_ids if it exists, otherwise _prepare_batch_inputs will
+                    # use it to overwrite our injected golden response!
+                    # The check in _prepare_batch_inputs is: if 'response_token_ids' in data and data['response_token_ids']
+                    # So we need to either delete the field or set it to None/empty list
+                    if 'response_token_ids' in inputs[target_idx]:
+                        logger.debug(f"Golden Truth Injection: Removing response_token_ids at target_idx {target_idx} "
+                                   f"to prevent overwriting injected content")
+                        # Delete the field to ensure _prepare_batch_inputs uses our injected string
+                        del inputs[target_idx]['response_token_ids']
+                        # Also remove response_loss_mask if it exists
+                        if 'response_loss_mask' in inputs[target_idx]:
+                            del inputs[target_idx]['response_loss_mask']
+                    
+                    # Verify the replacement
+                    new_content = inputs[target_idx]['messages'][-1]['content']
+                    if new_content != golden_response:
+                        logger.error(f"Golden Truth Injection FAILED: Content replacement did not persist! "
+                                   f"target_idx={target_idx}, expected='{golden_response[:100]}...', "
+                                   f"got='{str(new_content)[:100]}...'")
+                    else:
+                        logger.info(f"Golden Truth Injection: Group {group_idx.item()}, target_idx {target_idx}: "
+                                   f"Successfully replaced completion (old type: {type(old_content).__name__}) "
+                                   f"with golden response. Golden answer: '{gold_answer}'")
+                    
+                    # 5. Inject Rewards
+                    # Set the main reward function (usually index 0, answer_match_cosine) to 1.0
+                    # Also set other format-related rewards to small positive values if needed
+                    # Here we assume the first reward function is the main accuracy one.
+                    # We force the row in total_rewards_per_func to be ideal.
+                    
+                    # Set main reward (answer matching) to 1.0
+                    total_rewards_per_func[target_idx, 0] = 1.0
+                    # Set other rewards (format, etc) to 1.0 or appropriate values
+                    # Assuming subsequent rewards are format/consistency, 1.0 is usually safe for ground truth
+                    if total_rewards_per_func.shape[1] > 1:
+                        total_rewards_per_func[target_idx, 1:] = 1.0
+                    
+                    logger.debug(f"Golden Truth Injection: Injected at group {group_idx.item()}, target_idx {target_idx}, "
+                                f"answer='{gold_answer}', reward[0]={total_rewards_per_func[target_idx, 0].item()}")
+                        
+                    # 6. Reset Log Probs (Critical Step!)
+                    # If log_probs exist, we must reset them to a very small value to indicate "new strategy"
+                    # This ensures PPO ratio (new/old) is large, creating a strong learning signal (SFT-like)
+                    if 'log_probs' in target_input:
+                        # Using -100.0 as a proxy for log(0), representing extremely low probability
+                        if isinstance(target_input['log_probs'], torch.Tensor):
+                            target_input['log_probs'] = torch.full_like(target_input['log_probs'], -100.0)
+                        else:
+                            # If log_probs is not a tensor, create a tensor with the same shape/structure
+                            # This is a fallback for cases where log_probs might be a list or other type
+                            target_input['log_probs'] = -100.0
+                    
+                    # Also mark this sample so we can track it in logs if needed
+                    target_input['is_golden_injected'] = True
+
         total_advantages = self._compute_advantages(inputs, total_rewards_per_func)
 
         local_advantages = self.get_even_process_data(total_advantages)

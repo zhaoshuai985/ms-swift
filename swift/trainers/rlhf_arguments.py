@@ -55,6 +55,14 @@ class GRPOConfig(GRPOArgumentsMixin, SwiftArgumentsMixin, HfGRPOConfig):
     model_name: Optional[str] = None  # Sentence-BERT model for caption alignment
     threshold: Optional[float] = None  # Similarity threshold for caption alignment
     smooth_reward: Optional[bool] = None  # Whether to use smooth rewards for caption alignment
+    
+    # Similarity model parameters for cosine-based reward functions
+    answer_match_cosine_model_name: Optional[str] = None
+    answer_match_cosine_threshold: Optional[float] = None
+    caption_match_cosine_model_name: Optional[str] = None
+    caption_match_cosine_threshold: Optional[float] = None
+    title_match_cosine_model_name: Optional[str] = None
+    title_match_cosine_threshold: Optional[float] = None
 
     def __post_init__(self):
         GRPOArgumentsMixin.__post_init__(self)

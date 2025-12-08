@@ -62,6 +62,14 @@ class GRPOArguments(GRPOArgumentsMixin):
 
     truncation_strategy: Literal['delete', 'left', 'right', None] = None
 
+    # Similarity model parameters for cosine-based reward functions
+    answer_match_cosine_model_name: Optional[str] = None
+    answer_match_cosine_threshold: Optional[float] = None
+    caption_match_cosine_model_name: Optional[str] = None
+    caption_match_cosine_threshold: Optional[float] = None
+    title_match_cosine_model_name: Optional[str] = None
+    title_match_cosine_threshold: Optional[float] = None
+
 
 @dataclass
 class RLHFArguments(TeacherModelArguments, GRPOArguments, PPOArguments, RewardModelArguments, RLHFArgumentsMixin,

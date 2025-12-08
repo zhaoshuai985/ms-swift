@@ -1,6 +1,6 @@
 import os
 import re
-from typing import TYPE_CHECKING, Dict, List, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 import json
 
@@ -285,8 +285,8 @@ class Format(ORM):
     def __call__(self, completions, **kwargs) -> List[float]:
         """Reward function that checks if the completion has a specific format."""
         # pattern = r'^<think>.*?</think>\s*<answer>.*?</answer>(?![\s\S])'
-        pattern = r'^<think>.*?</think>\s*<answer>.*?</answer>\s*<plane>.*?</plane>\s*<modality>.*?</modality>\s*<title>.*?</title>\s*<caption>.*?</caption>(?![\s\S])'
-        # pattern = r'^<think>.*?</think>\s*<plane>.*?</plane>\s*<modality>.*?</modality>\s*<title>.*?</title>\s*<caption>.*?</caption>\s*<answer>.*?</answer>(?![\s\S])'
+        # pattern = r'^<think>.*?</think>\s*<answer>.*?</answer>\s*<plane>.*?</plane>\s*<modality>.*?</modality>\s*<title>.*?</title>\s*<caption>.*?</caption>(?![\s\S])'
+        pattern = r'^<think>.*?</think>\s*<plane>.*?</plane>\s*<modality>.*?</modality>\s*<title>.*?</title>\s*<caption>.*?</caption>\s*<answer>.*?</answer>(?![\s\S])'
         # pattern = r'^<plane>.*?</plane>\s*<modality>.*?</modality>\s*<title>.*?</title>\s*<caption>.*?</caption>\s*<think>.*?</think>\s*<answer>.*?</answer>(?![\s\S])'
         matches = [re.match(pattern, content, re.DOTALL | re.MULTILINE) for content in completions]
         return [1.0 if match else 0.0 for match in matches]
@@ -492,25 +492,79 @@ class AnswerMatchCosine(ORM):
     """
     
     def __init__(self, 
-                 model_name: str = "pritamdeka/S-BioBERT-snli-multinli-stsb",
-                 threshold: float = 0.70,
-                 smooth_reward: bool = True):
+                 model_name: Optional[str] = None,
+                 threshold: Optional[float] = None,
+                 smooth_reward: Optional[bool] = True,
+                 answer_match_cosine_model_name: Optional[str] = None,
+                 answer_match_cosine_threshold: Optional[float] = None):
         """
         Initialize AnswerMatchCosine reward function.
         
         Args:
-            model_name: SentenceTransformer model name
-              - "pritamdeka/S-BioBERT-snli-multinli-stsb" (medical-specific, default)
+            model_name: SentenceTransformer model name (can be overridden by answer_match_cosine_model_name)
+              - "sentence-transformers/all-mpnet-base-v2" (default, 通用强)
               - "all-MiniLM-L6-v2" (lightweight, general purpose)
-              - "all-mpnet-base-v2" (high quality, general purpose)
-            threshold: Cosine similarity threshold (0-1)
+              - "BAAI/bge-large-en-v1.5" (通用+医学平衡)
+            threshold: Cosine similarity threshold (0-1, can be overridden by answer_match_cosine_threshold)
               - 0.75: More lenient, accepts more paraphrases
               - 0.80: Balanced (default, recommended for medical VQA)
               - 0.85: Conservative, stricter semantic matching
             smooth_reward: Use smooth reward function
               - True: reward = max(0, (similarity - threshold) * 10), capped at 1.0
               - False: reward = 1.0 if similarity > threshold else 0.0
+            answer_match_cosine_model_name: Override model_name from command line (--answer_match_cosine_model_name)
+            answer_match_cosine_threshold: Override threshold from command line (--answer_match_cosine_threshold)
+        
+        Recommended Models (for medical VQA tasks, ranked by recommendation):
+        ======================================================================
+        1. BAAI/bge-large-en-v1.5 - 通用+医学平衡，检索优化，MTEB排名靠前，适合问答匹配
+        2. sentence-transformers/all-mpnet-base-v2 - 通用强，社区支持最好，STS基准表现优异
+        3. dmis-lab/biobert-base-cased - 医学专有名词优化，PubMed数据训练，医学术语敏感
+        4. intfloat/e5-large-v2 - 科学文献优化，指令式嵌入，BEIR基准表现好
+        5. sentence-transformers/all-roberta-large-v1 - 精度最高，适合高精度要求场景
+        6. BAAI/bge-base-en-v1.5 - 轻量级替代large版本，性价比高
+        
+        Recommended Threshold (based on industry best practices):
+        ==========================================================
+        - 0.70-0.75: Balanced, suitable for most medical VQA tasks (recommended starting point for experiments)
+        - 0.75-0.80: More strict, higher precision, lower recall
+        - 0.65-0.70: More lenient, higher recall, lower precision
+        - Current default: 0.50 (kept for variable control in experiments, can be adjusted via --answer_match_cosine_threshold)
+        - Note: With smooth_reward=True, threshold can be set 0.05-0.10 lower than hard threshold
         """
+        # Debug: Log received parameters
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(
+            f"AnswerMatchCosine __init__ received -> "
+            f"answer_match_cosine_model_name={answer_match_cosine_model_name}, "
+            f"answer_match_cosine_threshold={answer_match_cosine_threshold}, "
+            f"model_name={model_name}, threshold={threshold}"
+        )
+        
+        # Ignore any generic model_name/threshold from args; use specific overrides or defaults
+        model_name = None
+        threshold = None
+
+        # Priority: CLI override > default
+        if answer_match_cosine_model_name is not None and str(answer_match_cosine_model_name).strip() != "":
+            model_name = str(answer_match_cosine_model_name).strip()
+        else:
+            model_name = "pritamdeka/S-BioBERT-snli-multinli-stsb"
+
+        if answer_match_cosine_threshold is not None:
+            threshold = answer_match_cosine_threshold
+        else:
+            threshold = 0.50
+        
+        # Default smooth_reward to True when not provided (preserve legacy default)
+        if smooth_reward is None:
+            smooth_reward = True
+
+        # Log final selection
+        logger.info(
+            f"AnswerMatchCosine init -> model_name={model_name}, threshold={threshold}, smooth_reward={smooth_reward}"
+        )
         self.model_name = model_name
         self.threshold = threshold
         self.smooth_reward = smooth_reward
@@ -519,19 +573,39 @@ class AnswerMatchCosine(ORM):
     def _load_model(self):
         """Lazy load the SentenceTransformer model."""
         if self.model is None:
+            import logging
+            logger = logging.getLogger(__name__)
             try:
                 from sentence_transformers import SentenceTransformer
+                logger.info(f"Loading SentenceTransformer model: {self.model_name}")
                 self.model = SentenceTransformer(self.model_name)
+                
+                # Validate model was loaded successfully
+                if self.model is None:
+                    raise RuntimeError(f"Model {self.model_name} loaded but is None")
+                
+                # Validate tokenizer exists (required for encoding)
+                if not hasattr(self.model, 'tokenizer') or self.model.tokenizer is None:
+                    raise RuntimeError(
+                        f"Model {self.model_name} loaded but tokenizer is None. "
+                        f"This may indicate an incomplete model installation."
+                    )
+                
+                logger.info(f"Successfully loaded model {self.model_name}")
+                
             except ImportError:
                 raise ImportError(
                     "sentence-transformers not installed. "
                     "Run: pip install sentence-transformers"
                 )
             except Exception as e:
-                raise RuntimeError(
+                error_msg = (
                     f"Failed to load model {self.model_name}: {e}. "
-                    f"Check if model name is correct or download it first."
+                    f"Check if model name is correct, download it first, "
+                    f"or verify network connection if downloading from HuggingFace."
                 )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
     
     def _normalize_answer(self, text: str) -> str:
         """
@@ -565,6 +639,23 @@ class AnswerMatchCosine(ORM):
         try:
             # Lazy load model on first call
             self._load_model()
+            
+            # Validate model is ready before use
+            if self.model is None:
+                import logging
+                logging.error(
+                    f"AnswerMatchCosine: Model {self.model_name} is None after loading. "
+                    f"Returning zero rewards."
+                )
+                return [0.0] * len(completions)
+            
+            if not hasattr(self.model, 'encode'):
+                import logging
+                logging.error(
+                    f"AnswerMatchCosine: Model {self.model_name} does not have encode method. "
+                    f"Returning zero rewards."
+                )
+                return [0.0] * len(completions)
             
             # Extract and normalize answers from <answer></answer> tags in completions
             extracted_answers = []
@@ -608,7 +699,7 @@ class AnswerMatchCosine(ORM):
                 
                 if self.smooth_reward:
                     # Smooth reward: gradual increase around threshold
-                    reward = max(0.0, (sim_float - self.threshold) * 10)
+                    reward = max(0.0, (sim_float - self.threshold) * 5.0)
                     reward = min(1.0, reward)  # Cap at 1.0
                 else:
                     # Hard reward: 0 or 1
@@ -618,8 +709,12 @@ class AnswerMatchCosine(ORM):
         
         except Exception as e:
             import logging
-            logging.warning(
-                f"AnswerMatchCosine calculation failed: {e}. "
+            import traceback
+            logger = logging.getLogger(__name__)
+            error_details = traceback.format_exc()
+            logger.error(
+                f"AnswerMatchCosine calculation failed for model {self.model_name}: {e}\n"
+                f"Error details: {error_details}\n"
                 f"Returning zero rewards."
             )
             return [0.0] * len(completions)
@@ -715,29 +810,74 @@ class CaptionMatchCosine(ORM):
     """
     
     def __init__(self, 
-                 model_name: str = "pritamdeka/S-BioBERT-snli-multinli-stsb",
-                 threshold: float = 0.40,
-                 smooth_reward: bool = True):
+                 model_name: Optional[str] = None,
+                 threshold: Optional[float] = None,
+                 smooth_reward: Optional[bool] = True,
+                 caption_match_cosine_model_name: Optional[str] = None,
+                 caption_match_cosine_threshold: Optional[float] = None):
         """
         Initialize CaptionAlignment reward function.
         
         Args:
-            model_name: SentenceTransformer model name
-              - "all-MiniLM-L6-v2" (default, 22M, lightweight)
-              - "all-mpnet-base-v2" (109M, high quality)
+            model_name: SentenceTransformer model name (can be overridden by caption_match_cosine_model_name)
+              - "sentence-transformers/all-mpnet-base-v2" (default, 通用强)
+              - "all-MiniLM-L6-v2" (22M, lightweight)
+              - "BAAI/bge-large-en-v1.5" (通用+医学平衡)
               - "pritamdeka/S-BioBERT-snli-multinli-stsb" (medical-specific)
               - "dmis-lab/biobert-base-cased" (medical BioBERT)
               - "allenai/scibert-base-uncased" (scientific papers)
               - "allenai/specter" (academic citations)
               - Others available for experimentation
-            threshold: Similarity threshold (0-1)
+            threshold: Similarity threshold (0-1, can be overridden by caption_match_cosine_threshold)
               - 0.65: Aggressive, easier to get reward
               - 0.70: Balanced (default, recommended)
               - 0.75: Conservative, strict requirement
             smooth_reward: Use smooth reward function
               - True: reward = max(0, (similarity - threshold) * 2.0)
               - False: reward = 1.0 if similarity > threshold else 0.0
+            caption_match_cosine_model_name: Override model_name from command line (--caption_match_cosine_model_name)
+            caption_match_cosine_threshold: Override threshold from command line (--caption_match_cosine_threshold)
+        
+        Recommended Models (for medical VQA tasks, ranked by recommendation):
+        ======================================================================
+        1. BAAI/bge-large-en-v1.5 - 通用+医学平衡，检索优化，MTEB排名靠前，适合问答匹配
+        2. sentence-transformers/all-mpnet-base-v2 - 通用强，社区支持最好，STS基准表现优异
+        3. dmis-lab/biobert-base-cased - 医学专有名词优化，PubMed数据训练，医学术语敏感
+        4. intfloat/e5-large-v2 - 科学文献优化，指令式嵌入，BEIR基准表现好
+        5. sentence-transformers/all-roberta-large-v1 - 精度最高，适合高精度要求场景
+        6. BAAI/bge-base-en-v1.5 - 轻量级替代large版本，性价比高
+        
+        Recommended Threshold (based on industry best practices):
+        ==========================================================
+        - 0.60-0.65: Balanced for caption matching (recommended starting point for experiments)
+        - 0.65-0.70: More strict, higher precision for longer descriptive text
+        - 0.55-0.60: More lenient, higher recall for diverse caption styles
+        - Current default: 0.30 (kept for variable control in experiments, can be adjusted via --caption_match_cosine_threshold)
+        - Note: Caption text is typically longer than answers, so threshold can be lower than answer matching
         """
+        # Ignore any generic model_name/threshold from args; use specific overrides or defaults
+        model_name = None
+        threshold = None
+
+        # Priority: CLI override > default
+        if caption_match_cosine_model_name is not None and str(caption_match_cosine_model_name).strip() != "":
+            model_name = str(caption_match_cosine_model_name).strip()
+        else:
+            model_name = "pritamdeka/S-BioBERT-snli-multinli-stsb"
+
+        if caption_match_cosine_threshold is not None:
+            threshold = caption_match_cosine_threshold
+        else:
+            threshold = 0.30
+        
+        # Default smooth_reward to True when not provided (preserve legacy default)
+        if smooth_reward is None:
+            smooth_reward = True
+
+        import logging
+        logging.getLogger(__name__).info(
+            f"CaptionMatchCosine init -> model_name={model_name}, threshold={threshold}, smooth_reward={smooth_reward}"
+        )
         self.model_name = model_name
         self.threshold = threshold
         self.smooth_reward = smooth_reward
@@ -746,19 +886,39 @@ class CaptionMatchCosine(ORM):
     def _load_model(self):
         """Lazy load the SentenceTransformer model."""
         if self.model is None:
+            import logging
+            logger = logging.getLogger(__name__)
             try:
                 from sentence_transformers import SentenceTransformer
+                logger.info(f"Loading SentenceTransformer model: {self.model_name}")
                 self.model = SentenceTransformer(self.model_name)
+                
+                # Validate model was loaded successfully
+                if self.model is None:
+                    raise RuntimeError(f"Model {self.model_name} loaded but is None")
+                
+                # Validate tokenizer exists (required for encoding)
+                if not hasattr(self.model, 'tokenizer') or self.model.tokenizer is None:
+                    raise RuntimeError(
+                        f"Model {self.model_name} loaded but tokenizer is None. "
+                        f"This may indicate an incomplete model installation."
+                    )
+                
+                logger.info(f"Successfully loaded model {self.model_name}")
+                
             except ImportError:
                 raise ImportError(
                     "sentence-transformers not installed. "
                     "Run: pip install sentence-transformers"
                 )
             except Exception as e:
-                raise RuntimeError(
+                error_msg = (
                     f"Failed to load model {self.model_name}: {e}. "
-                    f"Check if model name is correct or download it first."
+                    f"Check if model name is correct, download it first, "
+                    f"or verify network connection if downloading from HuggingFace."
                 )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
     
     def __call__(self, completions, image_caption, **kwargs) -> List[float]:
         """
@@ -783,6 +943,23 @@ class CaptionMatchCosine(ORM):
         try:
             # Lazy load model on first call
             self._load_model()
+            
+            # Validate model is ready before use
+            if self.model is None:
+                import logging
+                logging.error(
+                    f"CaptionMatchCosine: Model {self.model_name} is None after loading. "
+                    f"Returning zero rewards."
+                )
+                return [0.0] * len(completions)
+            
+            if not hasattr(self.model, 'encode'):
+                import logging
+                logging.error(
+                    f"CaptionMatchCosine: Model {self.model_name} does not have encode method. "
+                    f"Returning zero rewards."
+                )
+                return [0.0] * len(completions)
 
             # Extract captions from <caption></caption> tags in completions
             # If no tags found, use the entire completion as fallback
@@ -832,8 +1009,12 @@ class CaptionMatchCosine(ORM):
         
         except Exception as e:
             import logging
-            logging.warning(
-                f"CaptionAlignment calculation failed: {e}. "
+            import traceback
+            logger = logging.getLogger(__name__)
+            error_details = traceback.format_exc()
+            logger.error(
+                f"CaptionMatchCosine calculation failed for model {self.model_name}: {e}\n"
+                f"Error details: {error_details}\n"
                 f"Returning zero rewards."
             )
             return [0.0] * len(completions)
@@ -855,17 +1036,62 @@ class TitleMatchCosine(ORM):
     """
     
     def __init__(self, 
-                 model_name: str = "pritamdeka/S-BioBERT-snli-multinli-stsb",
-                 threshold: float = 0.60,
-                 smooth_reward: bool = True):
+                 model_name: Optional[str] = None,
+                 threshold: Optional[float] = None,
+                 smooth_reward: Optional[bool] = True,
+                 title_match_cosine_model_name: Optional[str] = None,
+                 title_match_cosine_threshold: Optional[float] = None):
         """
         Initialize TitleMatchCosine reward function.
         
         Args:
-            model_name: SentenceTransformer model name
-            threshold: Similarity threshold (0-1)
+            model_name: SentenceTransformer model name (can be overridden by title_match_cosine_model_name)
+              - "sentence-transformers/all-mpnet-base-v2" (default, 通用强)
+            threshold: Similarity threshold (0-1, can be overridden by title_match_cosine_threshold)
             smooth_reward: Use smooth reward function
+            title_match_cosine_model_name: Override model_name from command line (--title_match_cosine_model_name)
+            title_match_cosine_threshold: Override threshold from command line (--title_match_cosine_threshold)
+        
+        Recommended Models (for medical VQA tasks, ranked by recommendation):
+        ======================================================================
+        1. BAAI/bge-large-en-v1.5 - 通用+医学平衡，检索优化，MTEB排名靠前，适合问答匹配
+        2. sentence-transformers/all-mpnet-base-v2 - 通用强，社区支持最好，STS基准表现优异
+        3. dmis-lab/biobert-base-cased - 医学专有名词优化，PubMed数据训练，医学术语敏感
+        4. intfloat/e5-large-v2 - 科学文献优化，指令式嵌入，BEIR基准表现好
+        5. sentence-transformers/all-roberta-large-v1 - 精度最高，适合高精度要求场景
+        6. BAAI/bge-base-en-v1.5 - 轻量级替代large版本，性价比高
+        
+        Recommended Threshold (based on industry best practices):
+        ==========================================================
+        - 0.65-0.70: Balanced for title matching (recommended starting point for experiments)
+        - 0.70-0.75: More strict, higher precision for short title text
+        - 0.60-0.65: More lenient, higher recall for diverse title formats
+        - Current default: 0.30 (kept for variable control in experiments, can be adjusted via --title_match_cosine_threshold)
+        - Note: Title text is typically shorter and more semantic, threshold can be between answer and caption
         """
+        # Ignore any generic model_name/threshold from args; use specific overrides or defaults
+        model_name = None
+        threshold = None
+
+        # Priority: CLI override > default
+        if title_match_cosine_model_name is not None and str(title_match_cosine_model_name).strip() != "":
+            model_name = str(title_match_cosine_model_name).strip()
+        else:
+            model_name = "pritamdeka/S-BioBERT-snli-multinli-stsb"
+
+        if title_match_cosine_threshold is not None:
+            threshold = title_match_cosine_threshold
+        else:
+            threshold = 0.30
+        
+        # Default smooth_reward to True when not provided (preserve legacy default)
+        if smooth_reward is None:
+            smooth_reward = True
+
+        import logging
+        logging.getLogger(__name__).info(
+            f"TitleMatchCosine init -> model_name={model_name}, threshold={threshold}, smooth_reward={smooth_reward}"
+        )
         self.model_name = model_name
         self.threshold = threshold
         self.smooth_reward = smooth_reward
@@ -874,19 +1100,39 @@ class TitleMatchCosine(ORM):
     def _load_model(self):
         """Lazy load the SentenceTransformer model."""
         if self.model is None:
+            import logging
+            logger = logging.getLogger(__name__)
             try:
                 from sentence_transformers import SentenceTransformer
+                logger.info(f"Loading SentenceTransformer model: {self.model_name}")
                 self.model = SentenceTransformer(self.model_name)
+                
+                # Validate model was loaded successfully
+                if self.model is None:
+                    raise RuntimeError(f"Model {self.model_name} loaded but is None")
+                
+                # Validate tokenizer exists (required for encoding)
+                if not hasattr(self.model, 'tokenizer') or self.model.tokenizer is None:
+                    raise RuntimeError(
+                        f"Model {self.model_name} loaded but tokenizer is None. "
+                        f"This may indicate an incomplete model installation."
+                    )
+                
+                logger.info(f"Successfully loaded model {self.model_name}")
+                
             except ImportError:
                 raise ImportError(
                     "sentence-transformers not installed. "
                     "Run: pip install sentence-transformers"
                 )
             except Exception as e:
-                raise RuntimeError(
+                error_msg = (
                     f"Failed to load model {self.model_name}: {e}. "
-                    f"Check if model name is correct or download it first."
+                    f"Check if model name is correct, download it first, "
+                    f"or verify network connection if downloading from HuggingFace."
                 )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
     
     def __call__(self, completions, image_title, **kwargs) -> List[float]:
         """
@@ -903,6 +1149,23 @@ class TitleMatchCosine(ORM):
         try:
             # Lazy load model on first call
             self._load_model()
+            
+            # Validate model is ready before use
+            if self.model is None:
+                import logging
+                logging.error(
+                    f"TitleMatchCosine: Model {self.model_name} is None after loading. "
+                    f"Returning zero rewards."
+                )
+                return [0.0] * len(completions)
+            
+            if not hasattr(self.model, 'encode'):
+                import logging
+                logging.error(
+                    f"TitleMatchCosine: Model {self.model_name} does not have encode method. "
+                    f"Returning zero rewards."
+                )
+                return [0.0] * len(completions)
 
             # Extract titles from <title></title> tags in completions
             # If no tags found, use the entire completion as fallback
@@ -949,11 +1212,682 @@ class TitleMatchCosine(ORM):
         
         except Exception as e:
             import logging
-            logging.warning(
-                f"TitleMatchCosine calculation failed: {e}. "
+            import traceback
+            logger = logging.getLogger(__name__)
+            error_details = traceback.format_exc()
+            logger.error(
+                f"TitleMatchCosine calculation failed for model {self.model_name}: {e}\n"
+                f"Error details: {error_details}\n"
                 f"Returning zero rewards."
             )
             return [0.0] * len(completions)
+        
+        return rewards
+
+
+class ReasoningConsistencyNLI(ORM):
+    """
+    基于NLI模型的推理-答案一致性检查奖励函数 (V2 改进版)
+    
+    改进点:
+    1. 将原始问题纳入NLI判断，构造更准确的premise
+    2. 只有预测答案正确 + 推理一致时才给正奖励
+    3. 矛盾和中性情况统一返回0，避免NLI误判带来的惩罚
+    
+    检测 <think> 中的推理过程是否与 <answer> 中的答案一致。
+    使用预训练的NLI模型判断推理是否蕴含(entail)答案。
+    
+    推荐模型（按推荐度降序排列，基于实际测试结果）:
+    
+    ⭐⭐⭐⭐⭐ 强烈推荐:
+    - cross-encoder/nli-MiniLM2-L6-H768 (~200MB, 最佳性价比)
+      测试表现: 1/2正确判断，平均Ent概率0.5561，对否定句式理解好
+      说明: 基于知识蒸馏从RoBERTa-Large提取，在SNLI+MultiNLI联合训练，体积小性能好
+    - facebook/bart-large-mnli (~1.5GB, 最高准确度)
+      测试表现: 1/2正确判断，平均Ent概率0.5726，适合医学领域
+      说明: BART大型版，在明确一致的样本上表现最佳（Ent概率94.41%）
+    - cross-encoder/nli-roberta-base (~500MB, 平衡选择)
+      测试表现: 1/2正确判断，平均Ent概率0.5249，性能稳定
+      说明: RoBERTa基础版，在明确一致的样本上表现优秀（Ent概率93.45%）
+    
+    ⭐⭐⭐⭐ 推荐:
+    - roberta-large-mnli (~1.4GB, 高准确度)
+      测试表现: 1/2正确判断，平均Ent概率0.5002
+    - typeform/distilbert-base-uncased-mnli (~250MB, 轻量级)
+      测试表现: 1/2正确判断，平均Ent概率0.5077，但表现不稳定
+    
+    ⭐⭐⭐ 可考虑:
+    - cross-encoder/nli-distilroberta-base (~400MB)
+      测试表现: 0/2正确判断，平均Ent概率0.1571，不推荐
+    - cross-encoder/nli-deberta-v3-small (~300MB)
+      测试表现: 0/2正确判断，平均Ent概率0.1697，不推荐
+    - cross-encoder/nli-deberta-v3-base (~800MB)
+      测试表现: 0/2正确判断，平均Ent概率0.0079，不推荐
+    - typeform/mobilebert-uncased-mnli (~100MB, 超轻量)
+      测试表现: 0/2正确判断，平均Ent概率0.2370，表现一般
+    
+    ⚠️  不推荐（无NLI分类头）:
+    - dmis-lab/biobert-base-cased-v1.1, monologg/biobert_v1.1_pubmed (BioBERT基础模型)
+    - allenai/scibert_scivocab_uncased (SciBERT基础模型)
+      说明: 这些模型不是专门的NLI模型，没有NLI分类头，无法准确判断
+    
+    性能说明:
+    - MiniLM2系列通过知识蒸馏从大模型提取，在保持小体积的同时保留大部分性能
+    - Cross-encoder架构比sentence-transformers的双编码器更准确，但推理更慢
+    - 测试发现: 对于不确定性推理（如"could indicate"），大部分模型判断为neutral
+    - 测试发现: 对于明确否定推理（如"no visible evidence"），多个模型能正确判断为entailment
+    
+    概率阈值方案风险分析:
+    - 当前使用argmax判断（选择概率最大的类别）
+    - 20%阈值方案风险: 可能误判Neutral为Entailment（如Neutral>60%但Ent>20%）
+    - 改进建议: 使用阈值+排名检查+排除高Contradiction
+      条件: entailment_prob > 0.2 AND entailment_prob >= neutral_prob AND contradiction_prob < 0.5
+    
+    Example:
+        问题: "Is there oral contrast in the colon?"
+        推理: "The image shows contrast material properly distributed in the colon"
+        答案: "Yes"
+        标签: "Yes"
+        → 预测正确 ✓ + NLI=entailment ✓ → 奖励 1.0
+        
+        问题: "Is there oral contrast in the colon?"
+        推理: "The image shows no obvious contrast in the colon"
+        答案: "No"
+        标签: "Yes"
+        → 预测错误 ✗ → 奖励 0.0 (即使推理和答案一致)
+    """
+    
+    def __init__(self,
+                 model_name: str = "cross-encoder/nli-deberta-v3-base",
+                 reward_entailment: float = 1.0,       # 蕴含(一致)且预测正确的奖励
+                 penalty_contradiction: float = 0.0,   # 矛盾时不惩罚(避免NLI误判)
+                 reward_neutral: float = 0.0,          # 中性时不奖励
+                 use_gpu: bool = True,                 # 是否使用GPU
+                 max_reasoning_length: int = 1000,     # 推理文本最大长度
+                 require_correct_answer: bool = True): # 是否要求预测答案正确
+        """
+        初始化 ReasoningConsistencyNLI 奖励函数
+        
+        Args:
+            model_name: NLI模型名称，根据显存选择合适的模型
+            reward_entailment: 推理与答案一致且预测正确时的奖励值
+            penalty_contradiction: 推理与答案矛盾时的惩罚值(建议设为0)
+            reward_neutral: 推理与答案无明确关系时的奖励值
+            use_gpu: 是否使用GPU进行推理
+            max_reasoning_length: 推理文本的最大字符长度（避免OOM）
+            require_correct_answer: 是否要求预测答案必须正确才给奖励
+        """
+        self.model_name = model_name
+        self.reward_entailment = reward_entailment
+        self.penalty_contradiction = penalty_contradiction
+        self.reward_neutral = reward_neutral
+        self.use_gpu = use_gpu
+        self.max_reasoning_length = max_reasoning_length
+        self.require_correct_answer = require_correct_answer
+        self.model = None
+        self.tokenizer = None
+        self.device = None
+        
+        # 不同模型的标签顺序映射
+        self.label_maps = {
+            'cross-encoder': ['contradiction', 'entailment', 'neutral'],
+            'facebook/bart': ['contradiction', 'neutral', 'entailment'],
+            'microsoft/deberta': ['entailment', 'neutral', 'contradiction'],
+            'roberta': ['contradiction', 'neutral', 'entailment'],
+            'default': ['contradiction', 'entailment', 'neutral']
+        }
+    
+    def _get_label_order(self) -> List[str]:
+        """根据模型名称获取正确的标签顺序"""
+        model_lower = self.model_name.lower()
+        if 'cross-encoder' in model_lower:
+            return self.label_maps['cross-encoder']
+        elif 'bart' in model_lower:
+            return self.label_maps['facebook/bart']
+        elif 'deberta' in model_lower and 'cross-encoder' not in model_lower:
+            return self.label_maps['microsoft/deberta']
+        elif 'roberta' in model_lower:
+            return self.label_maps['roberta']
+        else:
+            return self.label_maps['default']
+    
+    def _load_model(self):
+        """懒加载NLI模型"""
+        if self.model is None:
+            import torch
+            from transformers import AutoModelForSequenceClassification, AutoTokenizer
+            
+            try:
+                self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+                self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
+                self.model.eval()
+                
+                # 设置设备
+                if self.use_gpu and torch.cuda.is_available():
+                    self.device = torch.device('cuda')
+                else:
+                    self.device = torch.device('cpu')
+                
+                self.model.to(self.device)
+                
+                import logging
+                logging.info(f"ReasoningConsistencyNLI: Loaded {self.model_name} on {self.device}")
+                
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to load NLI model {self.model_name}: {e}. "
+                    f"Try a smaller model like 'cross-encoder/nli-MiniLM2-L6-H768'"
+                )
+    
+    def _extract_question_from_messages(self, messages: List[Dict]) -> str:
+        """
+        从messages中提取用户的原始问题
+        
+        Args:
+            messages: [{"role": "user", "content": "<image>Are regions of the brain infarcted?"}]
+            
+        Returns:
+            question: "Are regions of the brain infarcted?"
+        """
+        for msg in messages:
+            if msg.get('role') == 'user':
+                content = msg.get('content', '')
+                # 移除 <image> 标签
+                question = re.sub(r'<image>', '', content).strip()
+                return question
+        return ""
+    
+    def _safe_capitalize(self, text: str) -> str:
+        """
+        安全的首字母大写，保留医学缩写（如CT、MRI、DWI等）
+        
+        Args:
+            text: "the CT scan" 或 "MRI image"
+        
+        Returns:
+            "The CT scan" 或 "MRI image" (保留缩写大小写)
+        """
+        if not text:
+            return text
+        # 只大写第一个字符，保留其余原样
+        return text[0].upper() + text[1:] if len(text) > 1 else text.upper()
+    
+    def _construct_direct_hypothesis(self, question: str, answer: str) -> str:
+        """
+        将问题和答案转换为直接陈述句 (NLI hypothesis)
+        
+        全面覆盖各种问题类型:
+        - Is there X / Are there X
+        - Is X / Are X
+        - Does X / Do X
+        - Was X / Were X
+        - Has X / Have X
+        - Can X / Could X / Should X / Would X
+        - Contains "any"
+        
+        Args:
+            question: "Is there oral contrast in the colon?"
+            answer: "Yes" 或 "No"
+        
+        Returns:
+            hypothesis: "There is oral contrast in the colon." 或
+                      "There is no oral contrast in the colon."
+        """
+        # 移除问号并标准化
+        q = question.rstrip('?').strip()
+        q_lower = q.lower()
+        answer_lower = answer.lower().strip()
+        is_positive = answer_lower in ['yes', 'true']
+        
+        # 1. Is there X / Are there X
+        if q_lower.startswith('is there '):
+            subject = q[9:]  # 移除 "Is there "
+            if is_positive:
+                return f"There is {subject}."
+            else:
+                return f"There is no {subject}."
+        
+        elif q_lower.startswith('are there '):
+            subject = q[10:]  # 移除 "Are there " (10个字符)
+            if is_positive:
+                return f"There are {subject}."
+            else:
+                return f"There are no {subject}."
+        
+        # 2. Is X / Are X (主语 + 谓语)
+        elif q_lower.startswith('is ') and not q_lower.startswith('is there'):
+            rest = q[3:].strip()  # 移除 "Is "
+            if is_positive:
+                # "Is the heart enlarged?" → "The heart is enlarged."
+                # 如果rest中已有"is"，直接使用
+                if ' is ' in rest.lower() or rest.lower().startswith('this ') or rest.lower().startswith('that '):
+                    return f"{rest}."
+                else:
+                    # 假设最后一个词是形容词/谓语，前面都是主语
+                    # "the CT scan normal" → subject="the CT scan", predicate="normal"
+                    words = rest.split()
+                    if len(words) >= 2:
+                        subject = self._safe_capitalize(' '.join(words[:-1]))  # 除最后一个词外都是主语
+                        predicate = words[-1]  # 最后一个词是谓语
+                        return f"{subject} is {predicate}."
+                    else:
+                        return f"{self._safe_capitalize(rest)} is true."
+            else:
+                # "Is the heart enlarged?" → "The heart is not enlarged."
+                if ' is ' in rest.lower():
+                    return rest.replace(' is ', ' is not ', 1) + "."
+                elif ' is not ' in rest.lower():
+                    return f"{rest}."
+                else:
+                    words = rest.split()
+                    if len(words) >= 2:
+                        subject = self._safe_capitalize(' '.join(words[:-1]))
+                        predicate = words[-1]
+                        return f"{subject} is not {predicate}."
+                    else:
+                        return f"{self._safe_capitalize(rest)} is not true."
+        
+        elif q_lower.startswith('are ') and not q_lower.startswith('are there'):
+            rest = q[4:].strip()  # 移除 "Are "
+            if is_positive:
+                # "Are the lungs normal?" → "The lungs are normal."
+                if ' are ' in rest.lower():
+                    return f"{rest}."
+                else:
+                    words = rest.split()
+                    if len(words) >= 2:
+                        subject = self._safe_capitalize(' '.join(words[:-1]))
+                        predicate = words[-1]
+                        return f"{subject} are {predicate}."
+                    else:
+                        return f"{self._safe_capitalize(rest)} are true."
+            else:
+                # "Are the lungs normal?" → "The lungs are not normal."
+                if ' are ' in rest.lower():
+                    return rest.replace(' are ', ' are not ', 1) + "."
+                elif ' are not ' in rest.lower():
+                    return f"{rest}."
+                else:
+                    words = rest.split()
+                    if len(words) >= 2:
+                        subject = self._safe_capitalize(' '.join(words[:-1]))
+                        predicate = words[-1]
+                        return f"{subject} are not {predicate}."
+                    else:
+                        return f"{self._safe_capitalize(rest)} are not true."
+        
+        # 3. Does X / Do X
+        elif q_lower.startswith('does '):
+            rest = q[5:].strip()  # 移除 "Does "
+            words = rest.split()
+            if is_positive:
+                # "Does the heart appear enlarged?" → "The heart appears enlarged."
+                if len(words) >= 3:
+                    subject = self._safe_capitalize(' '.join(words[:2]))
+                    verb = words[2]
+                    predicate = ' '.join(words[3:]) if len(words) > 3 else ""
+                    # 将动词改为第三人称单数
+                    if not verb.endswith('s') and not verb.endswith('ed'):
+                        verb = verb + 's'
+                    result = f"{subject} {verb}"
+                    if predicate:
+                        result += f" {predicate}"
+                    return result + "."
+                else:
+                    # 回退到安全模式
+                    return f"The answer to the question is yes."
+            else:
+                # "Does the heart appear enlarged?" → "The heart does not appear enlarged."
+                if len(words) >= 3:
+                    subject = self._safe_capitalize(' '.join(words[:2]))
+                    predicate = ' '.join(words[2:])
+                    return f"{subject} does not {predicate}."
+                else:
+                    return f"The answer to the question is no."
+        
+        elif q_lower.startswith('do '):
+            rest = q[3:].strip()  # 移除 "Do "
+            words = rest.split()
+            if is_positive:
+                # "Do the lungs extend?" → "The lungs extend."
+                return f"{self._safe_capitalize(rest)}."
+            else:
+                # "Do the lungs extend?" → "The lungs do not extend."
+                if len(words) >= 2:
+                    subject = self._safe_capitalize(' '.join(words[:2]))
+                    predicate = ' '.join(words[2:]) if len(words) > 2 else words[1]
+                    return f"{subject} do not {predicate}."
+                else:
+                    return f"The answer to the question is no."
+        
+        # 4. Was X / Were X (过去时)
+        elif q_lower.startswith('was '):
+            rest = q[4:].strip()  # 移除 "Was "
+            if is_positive:
+                # "Was contrast used?" → "Contrast was used."
+                if ' was ' in rest.lower():
+                    return f"{self._safe_capitalize(rest)}."
+                else:
+                    words = rest.split()
+                    if len(words) >= 2:
+                        subject = self._safe_capitalize(words[0])
+                        predicate = ' '.join(words[1:])
+                        return f"{subject} was {predicate}."
+                    else:
+                        return f"{self._safe_capitalize(rest)} was true."
+            else:
+                # "Was contrast used?" → "Contrast was not used."
+                if ' was ' in rest.lower():
+                    return self._safe_capitalize(rest.replace(' was ', ' was not ', 1)) + "."
+                elif ' was not ' in rest.lower():
+                    return f"{self._safe_capitalize(rest)}."
+                else:
+                    words = rest.split()
+                    if len(words) >= 2:
+                        subject = self._safe_capitalize(words[0])
+                        predicate = ' '.join(words[1:])
+                        return f"{subject} was not {predicate}."
+                    else:
+                        return f"{self._safe_capitalize(rest)} was not true."
+        
+        elif q_lower.startswith('were '):
+            rest = q[5:].strip()  # 移除 "Were "
+            if is_positive:
+                # "Were the lungs normal?" → "The lungs were normal."
+                if ' were ' in rest.lower():
+                    return f"{rest}."
+                else:
+                    words = rest.split()
+                    if len(words) >= 2:
+                        return f"{words[0]} were {' '.join(words[1:])}."
+                    else:
+                        return f"{rest} were true."
+            else:
+                # "Were the lungs normal?" → "The lungs were not normal."
+                if ' were ' in rest.lower():
+                    return rest.replace(' were ', ' were not ', 1) + "."
+                elif ' were not ' in rest.lower():
+                    return f"{rest}."
+                else:
+                    words = rest.split()
+                    if len(words) >= 2:
+                        return f"{words[0]} were not {' '.join(words[1:])}."
+                    else:
+                        return f"{rest} were not true."
+        
+        # 5. Has X / Have X (完成时)
+        elif q_lower.startswith('has '):
+            rest = q[4:].strip()  # 移除 "Has "
+            if is_positive:
+                # "Has the bowel perforated?" → "The bowel has perforated."
+                if ' has ' in rest.lower():
+                    return f"{self._safe_capitalize(rest)}."
+                else:
+                    words = rest.split()
+                    if len(words) >= 2:
+                        subject = self._safe_capitalize(' '.join(words[:2]))
+                        predicate = ' '.join(words[2:]) if len(words) > 2 else words[1]
+                        return f"{subject} has {predicate}."
+                    else:
+                        return f"{self._safe_capitalize(rest)} has occurred."
+            else:
+                # "Has the bowel perforated?" → "The bowel has not perforated."
+                if ' has ' in rest.lower():
+                    return self._safe_capitalize(rest.replace(' has ', ' has not ', 1)) + "."
+                elif ' has not ' in rest.lower():
+                    return f"{self._safe_capitalize(rest)}."
+                else:
+                    words = rest.split()
+                    if len(words) >= 2:
+                        subject = self._safe_capitalize(' '.join(words[:2]))
+                        predicate = ' '.join(words[2:]) if len(words) > 2 else words[1]
+                        return f"{subject} has not {predicate}."
+                    else:
+                        return f"{self._safe_capitalize(rest)} has not occurred."
+        
+        elif q_lower.startswith('have '):
+            rest = q[5:].strip()  # 移除 "Have "
+            if is_positive:
+                # "Have brain structures crossed?" → "Brain structures have crossed."
+                if ' have ' in rest.lower():
+                    return f"{rest}."
+                else:
+                    words = rest.split()
+                    if len(words) >= 2:
+                        return f"{words[0]} have {' '.join(words[1:])}."
+                    else:
+                        return f"{rest} have occurred."
+            else:
+                # "Have brain structures crossed?" → "Brain structures have not crossed."
+                if ' have ' in rest.lower():
+                    return rest.replace(' have ', ' have not ', 1) + "."
+                elif ' have not ' in rest.lower():
+                    return f"{rest}."
+                else:
+                    words = rest.split()
+                    if len(words) >= 2:
+                        return f"{words[0]} have not {' '.join(words[1:])}."
+                    else:
+                        return f"{rest} have not occurred."
+        
+        # 6. Can X / Could X / Should X / Would X (情态动词)
+        elif q_lower.startswith('can '):
+            rest = q[4:]  # 移除 "Can "
+            if is_positive:
+                # "Can you see X?" → "X can be seen." 或 "You can see X."
+                if rest.lower().startswith('you '):
+                    return f"{rest}."
+                else:
+                    return f"{rest} can be observed."
+            else:
+                if rest.lower().startswith('you '):
+                    return rest.replace('you ', 'you cannot ', 1) + "."
+                else:
+                    return f"{rest} cannot be observed."
+        
+        elif q_lower.startswith('could '):
+            rest = q[6:]  # 移除 "Could "
+            if is_positive:
+                return f"{rest}."
+            else:
+                return rest.replace(' ', ' could not ', 1) + "."
+        
+        elif q_lower.startswith('should '):
+            rest = q[7:]  # 移除 "Should "
+            if is_positive:
+                return f"{rest}."
+            else:
+                return rest.replace(' ', ' should not ', 1) + "."
+        
+        elif q_lower.startswith('would '):
+            rest = q[6:]  # 移除 "Would "
+            if is_positive:
+                return f"{rest}."
+            else:
+                return rest.replace(' ', ' would not ', 1) + "."
+        
+        # 7. Contains "any" (特殊处理)
+        elif 'any ' in q_lower:
+            # "any observed degenerative changes?" → "There are observed degenerative changes."
+            # "any abnormal findings in the lower lung fields?" → "There are abnormal findings in the lower lung fields."
+            # 移除 "any" 并转换为陈述句
+            q_without_any = re.sub(r'\bany\b', '', q, flags=re.IGNORECASE).strip()
+            # 检查是否包含复数名词（findings, changes, signs等）
+            plural_keywords = ['findings', 'changes', 'signs', 'evidence', 'observed', 'abnormal findings', 'lesions', 'masses']
+            is_plural = any(keyword in q_without_any.lower() for keyword in plural_keywords)
+            
+            if is_positive:
+                # 使用 "There are" 对于复数，否则 "There is"
+                if is_plural:
+                    return f"There are {q_without_any}."
+                else:
+                    return f"There is {q_without_any}."
+            else:
+                if is_plural:
+                    return f"There are no {q_without_any}."
+                else:
+                    return f"There is no {q_without_any}."
+        
+        # 默认处理：对于未覆盖的问题类型
+        else:
+            if is_positive:
+                # 尝试将问题转换为陈述句
+                # "What is X?" → "X is present." (但What类型通常不是Yes/No)
+                return f"The answer to '{question}' is yes."
+            else:
+                return f"The answer to '{question}' is no."
+    
+    def _batch_nli_prediction(self, premises: List[str], hypotheses: List[str]) -> List[str]:
+        """
+        批量NLI预测
+        
+        Args:
+            premises: 前提列表（问题 + 推理过程）
+            hypotheses: 假设列表（答案陈述）
+            
+        Returns:
+            预测结果列表: 'entailment', 'contradiction', 或 'neutral'
+        """
+        import torch
+        
+        if not premises:
+            return []
+        
+        labels = self._get_label_order()
+        results = []
+        
+        # 批量编码
+        inputs = self.tokenizer(
+            premises, 
+            hypotheses,
+            padding=True,
+            truncation=True,
+            max_length=512,
+            return_tensors='pt'
+        )
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            predictions = outputs.logits.argmax(dim=-1).cpu().tolist()
+        
+        for pred_idx in predictions:
+            results.append(labels[pred_idx])
+        
+        return results
+    
+    def __call__(self, completions, **kwargs) -> List[float]:
+        """
+        计算推理-答案一致性奖励
+        
+        改进的工作流程:
+        1. 从kwargs中提取原始问题（messages字段）和标签答案（answer字段）
+        2. 从completion中提取推理过程和预测答案
+        3. 检查预测答案是否正确（如果require_correct_answer=True）
+        4. 构造NLI输入: premise = "Question: {q}\nReasoning: {r}"
+        5. 只有预测正确 + NLI=entailment时才给奖励
+        
+        Args:
+            completions: 模型生成的完整回复列表
+            **kwargs: 包含 messages（原始问题）和 answer（标签答案）
+            
+        Returns:
+            rewards: 奖励值列表
+        """
+        # 懒加载模型
+        self._load_model()
+        
+        rewards = [0.0] * len(completions)
+        premises = []
+        hypotheses = []
+        valid_indices = []
+        answer_correct_flags = []  # 记录预测答案是否正确
+        
+        # 从kwargs获取messages和answer
+        # kwargs格式: {'messages': [...], 'answer': [...], ...}
+        messages_list = kwargs.get('messages', [])
+        ground_truth_list = kwargs.get('answer', [])
+        
+        # 确保列表长度匹配
+        if not isinstance(messages_list, list):
+            messages_list = [messages_list] * len(completions)
+        if not isinstance(ground_truth_list, list):
+            ground_truth_list = [ground_truth_list] * len(completions)
+        
+        for i, content in enumerate(completions):
+            try:
+                # 提取 <think> 和 <answer>
+                think_match = re.search(r'<think>(.*?)</think>', content, re.DOTALL)
+                answer_match = re.search(r'<answer>(.*?)</answer>', content, re.DOTALL)
+                
+                if think_match and answer_match:
+                    reasoning = think_match.group(1).strip()
+                    predicted_answer = answer_match.group(1).strip()
+                    
+                    # 只处理 Yes/No 类型的答案
+                    answer_lower = predicted_answer.lower()
+                    if answer_lower in ['yes', 'no', 'true', 'false']:
+                        # 提取原始问题
+                        question = ""
+                        if i < len(messages_list) and messages_list[i]:
+                            msgs = messages_list[i]
+                            if isinstance(msgs, list):
+                                question = self._extract_question_from_messages(msgs)
+                            elif isinstance(msgs, str):
+                                question = re.sub(r'<image>', '', msgs).strip()
+                        
+                        # 检查预测答案是否正确
+                        is_correct = True
+                        if self.require_correct_answer and i < len(ground_truth_list):
+                            gt = ground_truth_list[i]
+                            if gt:
+                                gt_lower = str(gt).strip().lower()
+                                is_correct = (answer_lower == gt_lower)
+                        
+                        # 截断过长的推理文本以避免OOM
+                        reasoning_truncated = reasoning[:self.max_reasoning_length]
+                        
+                        # 构造包含问题的premise (改进点1)
+                        if question:
+                            premise = f"Question: {question}\nReasoning: {reasoning_truncated}"
+                        else:
+                            premise = f"Reasoning: {reasoning_truncated}"
+                        
+                        # 使用直接hypothesis构造方式 (方案A)
+                        hypothesis = self._construct_direct_hypothesis(question if question else "", predicted_answer)
+                        
+                        premises.append(premise)
+                        hypotheses.append(hypothesis)
+                        valid_indices.append(i)
+                        answer_correct_flags.append(is_correct)
+                        
+            except Exception as e:
+                import logging
+                logging.debug(f"ReasoningConsistencyNLI: Failed to process completion {i}: {e}")
+                continue
+        
+        # 批量预测
+        if premises:
+            try:
+                nli_results = self._batch_nli_prediction(premises, hypotheses)
+                
+                for idx, result, is_correct in zip(valid_indices, nli_results, answer_correct_flags):
+                    if result == 'entailment':
+                        # 改进点4: 只有预测正确且一致时才给奖励
+                        if self.require_correct_answer:
+                            rewards[idx] = self.reward_entailment if is_correct else 0.0
+                        else:
+                            rewards[idx] = self.reward_entailment
+                    elif result == 'contradiction':
+                        # 改进点2&3: 矛盾时不惩罚
+                        rewards[idx] = self.penalty_contradiction
+                    else:  # neutral
+                        rewards[idx] = self.reward_neutral
+                        
+            except Exception as e:
+                import logging
+                logging.warning(f"ReasoningConsistencyNLI batch prediction failed: {e}")
+                # 发生错误时保持默认的0.0奖励
         
         return rewards
 
@@ -964,14 +1898,24 @@ orms = {
     'accuracy': MathAccuracy,
     'smart_accuracy': SmartAccuracy,
     'answer_match_string': AnswerMatchString,
-    'answer_match_cosine': AnswerMatchCosine(model_name="pritamdeka/S-BioBERT-snli-multinli-stsb", threshold=0.50, smooth_reward=True),
+    # Changed to class to support command line parameters (--answer_match_cosine_model_name, --answer_match_cosine_threshold)
+    # Default values: model_name="pritamdeka/S-BioBERT-snli-multinli-stsb", threshold=0.50
+    'answer_match_cosine': AnswerMatchCosine,
     'plane_match_string': PlaneMatchString,
     'modality_match_string': ModalityMatchString,
-    'caption_match_cosine': CaptionMatchCosine(model_name="pritamdeka/S-BioBERT-snli-multinli-stsb", threshold=0.30, smooth_reward=True),
-    'title_match_cosine': TitleMatchCosine(model_name="pritamdeka/S-BioBERT-snli-multinli-stsb", threshold=0.30, smooth_reward=True),
+    # Changed to class to support command line parameters (--caption_match_cosine_model_name, --caption_match_cosine_threshold)
+    # Default values: model_name="pritamdeka/S-BioBERT-snli-multinli-stsb", threshold=0.30
+    'caption_match_cosine': CaptionMatchCosine,
+    # Changed to class to support command line parameters (--title_match_cosine_model_name, --title_match_cosine_threshold)
+    # Default values: model_name="pritamdeka/S-BioBERT-snli-multinli-stsb", threshold=0.30
+    'title_match_cosine': TitleMatchCosine,
     'format': Format,
     'react_format': ReActFormat,
     'cosine': CosineReward,
     'repetition': RepetitionPenalty,
     'soft_overlong': SoftOverlong,
+    # 推理-答案一致性奖励函数 V2 (按显存需求从小到大)
+    # 改进: 1.问题纳入NLI 2.矛盾不惩罚 3.预测正确+一致才奖励
+    'reasoning_consistency_nli_mini': ReasoningConsistencyNLI(model_name="cross-encoder/nli-MiniLM2-L6-H768", reward_entailment=1.0, penalty_contradiction=0.0, require_correct_answer=True),
+    'reasoning_consistency_nli_large': ReasoningConsistencyNLI(model_name="facebook/bart-large-mnli", reward_entailment=1.0, penalty_contradiction=0.0, require_correct_answer=True),
 }

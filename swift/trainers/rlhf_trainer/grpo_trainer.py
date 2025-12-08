@@ -127,8 +127,28 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                             key: getattr(args, key)
                             for key in reward_func_args if key not in ['self', 'args', 'kwargs'] and hasattr(args, key)
                         }
+                        
+                        # Special handling for reward function parameters that may be specified via CLI
+                        # but not directly as args attributes (e.g., answer_match_cosine_model_name, answer_match_cosine_threshold)
+                        reward_param_mappings = {
+                            'answer_match_cosine': ['answer_match_cosine_model_name', 'answer_match_cosine_threshold'],
+                            'caption_match_cosine': ['caption_match_cosine_model_name', 'caption_match_cosine_threshold'],
+                            'title_match_cosine': ['title_match_cosine_model_name', 'title_match_cosine_threshold'],
+                        }
+                        if reward_func in reward_param_mappings:
+                            for param_key in reward_param_mappings[reward_func]:
+                                if hasattr(args, param_key):
+                                    param_value = getattr(args, param_key)
+                                    if param_value is not None:
+                                        reward_func_kwargs[param_key] = param_value
+                        
                         if 'tokenizer' in reward_func_args:
                             reward_func_kwargs['tokenizer'] = self.processing_class
+                        
+                        import logging
+                        logging.getLogger(__name__).info(
+                            f"GRPOTrainer: Instantiating {reward_func} with kwargs keys: {list(reward_func_kwargs.keys())}"
+                        )
                         reward_funcs[i] = reward_func_obj(**reward_func_kwargs)
                     else:
                         # It's already an instance, use it directly

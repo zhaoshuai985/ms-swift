@@ -332,6 +332,17 @@ def get_current_device():
     return current_device
 
 
+def get_torch_device():
+    if is_torch_cuda_available():
+        return torch.cuda
+    elif is_torch_npu_available():
+        return torch.npu
+    elif is_torch_mps_available():
+        return torch.mps
+    else:
+        return torch.cpu
+
+
 def set_device(local_rank: Optional[Union[str, int]] = None):
     if local_rank is None:
         local_rank = max(0, get_dist_setting()[1])
@@ -377,6 +388,42 @@ def get_position_ids_from_cu_seqlens(cu_seqlens: torch.LongTensor):
     seq_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
     position_ids = torch.cat([torch.arange(seq_len, device=cu_seqlens.device) for seq_len in seq_lengths], dim=0)
     return position_ids.unsqueeze(0)
+
+
+def get_last_valid_indices(attention_mask: torch.Tensor) -> torch.Tensor:
+    """
+    Get the last valid (non-padding) token position indices for each sample.
+
+    This function correctly handles sequences with different padding directions (left/right/none)
+    within the same batch by computing the last valid index for each sequence individually.
+
+    Args:
+        attention_mask: Attention mask [batch_size, seq_len] where 1=valid, 0=padding
+
+    Returns:
+        torch.Tensor: Indices of last valid positions [batch_size]
+
+    Examples:
+        >>> # Right padding
+        >>> attention_mask = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 0]])
+        >>> get_last_valid_indices(attention_mask)
+        tensor([2, 3])
+
+        >>> # Left padding
+        >>> attention_mask = torch.tensor([[0, 0, 1, 1, 1], [0, 1, 1, 1, 1]])
+        >>> get_last_valid_indices(attention_mask)
+        tensor([4, 4])
+    """
+    seq_len = attention_mask.shape[1]
+
+    # Flip the mask horizontally to bring the last elements to the front.
+    # `argmax` will then find the index of the first '1', which corresponds to the last valid token.
+    last_valid_indices = torch.fliplr(attention_mask).argmax(dim=1)
+
+    # Convert the index from the right-to-left frame to the original left-to-right frame.
+    indices = seq_len - 1 - last_valid_indices
+
+    return indices
 
 
 class Serializer:

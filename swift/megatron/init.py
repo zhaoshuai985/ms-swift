@@ -1,10 +1,12 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 import concurrent.futures
+import logging
 import os
 import subprocess
 import sys
 from contextlib import contextmanager
-from copy import copy
+from copy import copy, deepcopy
+from functools import partial
 from typing import List, Optional, Tuple
 
 import peft
@@ -65,7 +67,7 @@ def _patch_mla_attention():
         gather_from_tensor_model_parallel_region,
         scatter_to_sequence_parallel_region,
     )
-    megatron_core_013 = version.parse(megatron.core.__version__) >= version.parse('0.13.0rc0')
+    mcore_013 = version.parse(megatron.core.__version__) >= version.parse('0.13.0rc0')
 
     # Code borrowed from NVIDIA/Megatron-LM
     def forward(
@@ -111,7 +113,7 @@ def _patch_mla_attention():
         # Adjust key, value for inference
         # ===================================================
         # rotary_pos_emb = None
-        if megatron_core_013:
+        if mcore_013:
             query, key, value, _, attn_mask_type, _ = self._adjust_key_value_for_inference(
                 inference_context, query, key, value, rotary_pos_emb=None)
         else:
@@ -378,6 +380,110 @@ def _patch_TEGroupedLinear():
     TEGroupedLinear.sharded_state_dict = sharded_state_dict
 
 
+def _patch_megatron_tokenizer():
+    from megatron.training import global_vars
+
+    def build_tokenizer(args):
+        return 'dummy_tokenizer'
+
+    global_vars.build_tokenizer = build_tokenizer
+
+
+def _patch_mtp():
+    from megatron.core import InferenceParams
+    from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer
+    from megatron.core.packed_seq_params import PackedSeqParams
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        context: torch.Tensor = None,
+        context_mask: torch.Tensor = None,
+        rotary_pos_emb: torch.Tensor = None,
+        rotary_pos_cos: torch.Tensor = None,
+        rotary_pos_sin: torch.Tensor = None,
+        attention_bias: torch.Tensor = None,
+        inference_params: InferenceParams = None,
+        packed_seq_params: PackedSeqParams = None,
+        sequence_len_offset: torch.Tensor = None,
+        embedding=None,
+    ):
+        """
+        Execute the forward pass through the Multi-Token Prediction (MTP) layer.
+
+        Args:
+            input_ids (Tensor): Input token IDs .
+            position_ids (Tensor): Positional IDs of the input tokens.
+            hidden_states (Tensor): Hidden states tensor of shape [s, b, h] where s is the
+                sequence length, b is the batch size, and h is the hidden size.
+            attention_mask (Tensor): Boolean tensor of shape [1, 1, s, s] for masking
+                self-attention.
+            context (Tensor, optional): Context tensor for cross-attention, if applicable.
+            context_mask (Tensor, optional): Mask for cross-attention context, if applicable.
+            rotary_pos_emb (Tensor, optional): Rotary positional embeddings.
+            rotary_pos_cos (Tensor, optional): Cosine component of rotary positional embeddings.
+            rotary_pos_sin (Tensor, optional): Sine component of rotary positional embeddings.
+            sequence_len_offset (Tensor, optional): Offset for sequence length, if applicable.
+            embedding (Callable): The embedding module from gpt model to compute the decoder input.
+
+        Returns:
+            Union[Tensor, Tuple[Tensor, Tensor]]: The output hidden states tensor of shape
+            [s, b, h], and optionally the updated context tensor if cross-attention is used.
+        """
+        # TODO: Multimodal compatible
+        assert context is None, 'multi token prediction + cross attention is not yet supported.'
+        input_ids, position_ids, decoder_input, hidden_states = self._get_embeddings(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            embedding=embedding,
+            hidden_states=hidden_states,
+        )
+        packed_seq = packed_seq_params is not None and packed_seq_params.qkv_format == 'thd'
+        if packed_seq:
+            assert not self.transformer_layer.self_attention.config.apply_rope_fusion
+            assert position_ids.shape[0] == 1, f'position_ids.shape: {position_ids.shape}'
+            rotary_pos_emb = rotary_pos_emb[position_ids[0]]
+        if self.config.recompute_granularity == 'full' and self.training:
+            hidden_states = self._checkpointed_forward(
+                partial(
+                    self._proj_and_transformer_layer,
+                    packed_seq_params=packed_seq_params,
+                    sequence_len_offset=sequence_len_offset,
+                ),
+                hidden_states=hidden_states,
+                decoder_input=decoder_input,
+                attention_mask=attention_mask,
+                context=context,
+                context_mask=context_mask,
+                rotary_pos_emb=rotary_pos_emb,
+                rotary_pos_cos=rotary_pos_cos,
+                rotary_pos_sin=rotary_pos_sin,
+                attention_bias=attention_bias,
+                inference_params=inference_params,
+            )
+        else:
+            hidden_states = self._proj_and_transformer_layer(
+                hidden_states=hidden_states,
+                decoder_input=decoder_input,
+                attention_mask=attention_mask,
+                context=context,
+                context_mask=context_mask,
+                rotary_pos_emb=rotary_pos_emb,
+                rotary_pos_cos=rotary_pos_cos,
+                rotary_pos_sin=rotary_pos_sin,
+                attention_bias=attention_bias,
+                inference_params=inference_params,
+                packed_seq_params=packed_seq_params,
+                sequence_len_offset=sequence_len_offset,
+            )
+        return hidden_states, input_ids, position_ids
+
+    MultiTokenPredictionLayer.forward = forward
+
+
 def _patch_peft_ModulesToSaveWrapper():
     if version.parse(peft.__version__) >= version.parse('0.16'):
         from peft.utils import other as peft_module
@@ -420,7 +526,7 @@ def _patch_TransformerLayer():
     from megatron.training import get_args
     from megatron.core.transformer import TransformerLayer
     _origin_forward = TransformerLayer.forward
-    megatron_core_013 = version.parse(megatron.core.__version__) >= version.parse('0.13.0rc0')
+    mcore_013 = version.parse(megatron.core.__version__) >= version.parse('0.13.0rc0')
 
     def forward(self, *_args, **kwargs):
         """
@@ -429,16 +535,17 @@ def _patch_TransformerLayer():
         This method calls the core computation of a transformer layer, including
         self-attention, cross-attention (if applicable), and feed-forward operations.
         """
-        if not megatron_core_013:
+        if not mcore_013:
             return _origin_forward(self, *_args, **kwargs)
         hidden_states, context = self._forward_attention(*_args, **kwargs)
         args = get_args()
         mlp_padding_free = args.mlp_padding_free and 'attention_mask' in kwargs
-        if mlp_padding_free:
-            mask = (kwargs['attention_mask'].sum(dim=(1, 3)) > 0).t()
+        mask = None
+        if mlp_padding_free and hidden_states.shape[1] > 1:
+            mask = ((~kwargs['attention_mask']).sum(dim=(1, 3)) > 0).t()
             hidden_states = hidden_states[mask][:, None]
         output = self._forward_mlp(hidden_states, kwargs.get('inference_context', None))
-        if mlp_padding_free:
+        if mask is not None:
             new_output = hidden_states.new_zeros((*mask.shape, output.shape[-1]))
             new_output[mask] = output.squeeze(1)
             output = new_output
@@ -508,6 +615,16 @@ def _patch_torch_FileSystemReader():
     FileSystemReader.read_data = read_data
 
 
+def _patch_validate_non_overlapping_shards_metadata():
+    # too slow
+    from torch.distributed._shard.sharded_tensor import api
+
+    def validate_non_overlapping_shards_metadata(*args, **kwargs):
+        pass
+
+    api.validate_non_overlapping_shards_metadata = validate_non_overlapping_shards_metadata
+
+
 def _patch_TELinear():
     from megatron.core.extensions.transformer_engine import TELinear
 
@@ -518,13 +635,26 @@ def _patch_TELinear():
     TELinear.__repr__ = __repr__
 
 
+def _patch_build_train_valid_test_datasets():
+    from megatron.training import training
+
+    def build_train_valid_test_datasets(build_train_valid_test_datasets_provider, *args, **kwargs):
+        train_valid_test_num_samples = training.get_train_valid_test_num_samples()
+        return build_train_valid_test_datasets_provider(train_valid_test_num_samples)
+
+    training.build_train_valid_test_datasets = build_train_valid_test_datasets
+
+
 def _patch_mrope():
     from megatron.core.models.common.embeddings.rotary_pos_embedding import MultimodalRotaryEmbedding
     from megatron.core import parallel_state
+    import megatron.core
     from megatron.core.models.common.embeddings.rope_utils import (get_pos_emb_on_this_cp_rank,
                                                                    _apply_rotary_pos_emb_bshd)
     from megatron.core.models.common.embeddings import rope_utils
     from megatron.training import get_args
+
+    mcore_013 = version.parse(megatron.core.__version__) >= version.parse('0.13.0rc0')
 
     # Code borrowed from huggingface/transformers
     def apply_interleaved_mrope(freqs, mrope_section):
@@ -608,8 +738,16 @@ def _patch_mrope():
         Returns:
             Tensor: Shape [t, h, d]. The input tensor after applying RoPE.
         """
-        args = get_args()
-        if args.position_embedding_type != 'mrope':
+        if cp_group is not None:
+            cp_size = cp_group.size()
+        else:
+            args = get_args()
+            cp_size = args.context_parallel_size
+        cu_seqlens_for_batched = cu_seqlens // cp_size
+        use_batched_rope = (freqs.dim() >= 1 and freqs.shape[0] == cu_seqlens_for_batched[-1]).item()
+        if not use_batched_rope:
+            logger.warning_once('Using non-batched RoPE, which may affect performance.')
+            kwargs = {'cp_group': cp_group} if mcore_013 else {}
             return _origin_apply_rotary_pos_emb_thd(
                 t,
                 cu_seqlens,
@@ -617,29 +755,23 @@ def _patch_mrope():
                 rotary_interleaved=rotary_interleaved,
                 multi_latent_attention=multi_latent_attention,
                 mscale=mscale,
-                cp_group=cp_group,
+                **kwargs,
             )
 
-        if cp_group is None:
-            raise ValueError('cp_group must be provided for THD format RoPE')
-        cp_size = cp_group.size()
-        cu_seqlens = cu_seqlens // cp_size
-        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-
-        return torch.cat([
-            _apply_rotary_pos_emb_bshd(
-                x.unsqueeze(1),
-                f,
-                rotary_interleaved=rotary_interleaved,
-                multi_latent_attention=multi_latent_attention,
-                mscale=mscale,
-            ) for x, f in zip(torch.split(t, seqlens), torch.split(freqs, seqlens))
-        ]).squeeze(1)
+        return _apply_rotary_pos_emb_bshd(
+            t.unsqueeze(1),
+            freqs,
+            rotary_interleaved=rotary_interleaved,
+            multi_latent_attention=multi_latent_attention,
+            mscale=mscale,
+        ).squeeze(1)
 
     rope_utils._apply_rotary_pos_emb_thd = _apply_rotary_pos_emb_thd
 
 
 def _patch_megatron():
+    os.environ.pop('VLLM_USE_MODELSCOPE', None)
+    logging_level = logging.root.level
     _patch_flash_attn()
     _patch_transformer_engine()
     _patch_TELinear()
@@ -648,12 +780,21 @@ def _patch_megatron():
     _patch_TEGroupedLinear()
     _patch_TransformerLayer()
     _patch_compile_helpers()
+    _patch_build_train_valid_test_datasets()
     _patch_mrope()
+    _patch_megatron_tokenizer()
+    _patch_mtp()
+    logging.root.setLevel(logging_level)  # revert logger level
     from swift.megatron import tuners  # patch lora
     try:
         _patch_torch_FileSystemReader()
         logger.info('Patch FileSystemReader successfully applied.')
     except Exception:
+        pass
+    try:
+        _patch_validate_non_overlapping_shards_metadata()
+    except Exception:
+        logger.warning('Patch validate_non_overlapping_shards_metadata failed.')
         pass
     try:
         _patch_peft_BaseTuner()
@@ -671,7 +812,7 @@ def init_megatron_env() -> None:
         # TODO: Synchronization issues may occur in DDP scenarios
         # if the distributed environment has not been initialized.
         os.environ['MEGATRON_LM_PATH'] = git_clone_github(
-            'https://github.com/NVIDIA/Megatron-LM', branch='core_r0.13.0')
+            'https://github.com/NVIDIA/Megatron-LM', branch='core_r0.14.0')
     with safe_ddp_context(hash_id='megatron-lm'):
         if not is_megatron_available():
             subprocess_run([sys.executable, '-m', 'pip', 'install', '-e', os.environ['MEGATRON_LM_PATH']])

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 from trl import CPOConfig as HfCPOConfig
 from trl import DPOConfig as HfDPOConfig
@@ -10,7 +10,7 @@ from trl import ORPOConfig as HfORPOConfig
 from trl import PPOConfig as HfPPOConfig
 from trl import RewardConfig as HfRewardConfig
 
-from .arguments import GRPOArgumentsMixin, SwiftArgumentsMixin
+from .arguments import GRPOArgumentsMixin, RolloutTrainerArgumentsMixin, SwiftArgumentsMixin
 
 
 @dataclass
@@ -44,25 +44,18 @@ class PPOConfig(SwiftArgumentsMixin, HfPPOConfig):
 
 
 @dataclass
-class GKDConfig(SwiftArgumentsMixin, HfGKDConfig):
-    pass
+class GKDConfig(RolloutTrainerArgumentsMixin, SwiftArgumentsMixin, HfGKDConfig):
+    offload_teacher_model: bool = False
+    max_completion_length: int = 512
+    log_completions: bool = False
+
+    def __post_init__(self):
+        RolloutTrainerArgumentsMixin.__post_init__(self)
+        SwiftArgumentsMixin.__post_init__(self)
 
 
 @dataclass
 class GRPOConfig(GRPOArgumentsMixin, SwiftArgumentsMixin, HfGRPOConfig):
-    stop_words: List[str] = field(default_factory=list)
-    # CaptionAlignment reward function parameters
-    model_name: Optional[str] = None  # Sentence-BERT model for caption alignment
-    threshold: Optional[float] = None  # Similarity threshold for caption alignment
-    smooth_reward: Optional[bool] = None  # Whether to use smooth rewards for caption alignment
-    
-    # Similarity model parameters for cosine-based reward functions
-    answer_match_cosine_model_name: Optional[str] = None
-    answer_match_cosine_threshold: Optional[float] = None
-    caption_match_cosine_model_name: Optional[str] = None
-    caption_match_cosine_threshold: Optional[float] = None
-    title_match_cosine_model_name: Optional[str] = None
-    title_match_cosine_threshold: Optional[float] = None
 
     def __post_init__(self):
         GRPOArgumentsMixin.__post_init__(self)

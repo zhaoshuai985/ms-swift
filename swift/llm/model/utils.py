@@ -61,6 +61,7 @@ class ModelInfo:
     # extra
     rope_scaling: Optional[Dict[str, Any]] = None
     is_moe_model: bool = False
+    is_multimodal: bool = False
     config: Optional[PretrainedConfig] = None
     task_type: Literal['causal_lm', 'seq_cls', 'embedding', None] = None
     num_labels: Optional[int] = None
@@ -71,6 +72,8 @@ class ModelInfo:
 
 
 class HfConfigFactory:
+    llm_keys = ['language_config', 'llm_config', 'text_config']
+    vision_keys = ['vit_config', 'vision_config', 'audio_config']
     """This class is used to read config from config.json(maybe params.json also)"""
 
     @staticmethod
@@ -97,9 +100,9 @@ class HfConfigFactory:
             keys = dir(config)
         else:
             return []
-        config_keys = [None, 'language_config', 'llm_config', 'text_config']
+        config_keys = [None] + HfConfigFactory.llm_keys
         if include_vit:
-            config_keys += ['vit_config', 'vision_config', 'audio_config']
+            config_keys += HfConfigFactory.vision_keys
         if attr_name in keys and parent_key in config_keys:
             res.append((config, deep_getattr(config, attr_name)))
 
@@ -118,6 +121,20 @@ class HfConfigFactory:
             return True
         for key in ['num_experts', 'num_experts_per_tok', 'moe_intermediate_size']:
             if HfConfigFactory.get_config_attr(config, key):
+                return True
+        return False
+
+    @staticmethod
+    def is_multimodal(config) -> bool:
+        if isinstance(config, dict):
+            keys = config.keys()
+        elif isinstance(config, PretrainedConfig):
+            keys = dir(config)
+        else:
+            keys = []
+        keys = set(keys)
+        for key in (HfConfigFactory.llm_keys + HfConfigFactory.vision_keys):
+            if key in keys:
                 return True
         return False
 
@@ -214,7 +231,7 @@ class HfConfigFactory:
         if torch_dtype is None:
             return None
         if isinstance(torch_dtype, str):
-            torch_dtype = eval(f'torch.{torch_dtype}')
+            torch_dtype = getattr(torch, torch_dtype)
         return torch_dtype
 
     @staticmethod
@@ -383,13 +400,10 @@ def get_llm_model(model: torch.nn.Module, model_meta=None, inner_backbone=True):
     else:
         llm_model = model
 
-    if 'CausalLM' not in llm_model.__class__.__name__:
-        llm_model = model
-
     if inner_backbone:
         if hasattr(llm_model, 'thinker'):
             llm_model = llm_model.thinker.model
-        else:
+        elif hasattr(llm_model, 'model'):
             llm_model = llm_model.model
     return llm_model
 

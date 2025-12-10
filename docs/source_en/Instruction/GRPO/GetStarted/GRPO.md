@@ -4,7 +4,9 @@ GRPOTrainer underwent a code refactoring in ms-swift3.5. If you are using a swif
 
 [GRPO (Group Relative Policy Optimization)](https://arxiv.org/abs/2402.03300) leverages intra-group relative advantage calculations to replace the independent value model in the PPO algorithm and directly incorporates KL divergence penalties into the loss function to improve training stability.
 
-### GRPO Objective Function
+## Algorithm Overview
+
+GRPO Objective Function is defined as
 $
 {\scriptstyle
 \begin{aligned}
@@ -157,6 +159,12 @@ When running in Colocate mode, out-of-memory (OOM) issues may frequently occur. 
 --move_model_batches [批次数量]
 ```
 
+6. Store Megatron exported HF format weights for vLLM updates in CPU main memory to reduce GPU memory usage:
+
+```bash
+--offload_bridge true
+```
+
 ### 2. Async(External) Mode
 
 Training and inference resources are separated, with a dedicated inference server deployed.
@@ -183,7 +191,7 @@ swift rollout \
 ```
 For more rollout parameters, refer to the [vllm arguments](../../../Instruction/Command-line-parameters.md#vllm-arguments) and [rollout arguments](../../../Instruction/Command-line-parameters.md#rollout-arguments)
 
-Note: When set `use_async_engine`, enabling only DP (Data Parallelism) may cause errors. [Related issue](https://github.com/vllm-project/vllm/issues/18567). If errors occur, try enabling both TP (Tensor Parallelism) and DP.
+Note: When set `use_async_engine`, enabling only DP (Data Parallelism) may cause errors. [Related issue](https://github.com/vllm-project/vllm/issues/18567). If errors occur, try enabling both TP (Tensor Parallelism) and DP or upgrading vLLM.
 
 To configure the external vLLM server during training, use the following parameters:
 
@@ -194,6 +202,31 @@ To configure the external vLLM server during training, use the following paramet
 --vllm_server_port <service_port> \
 --vllm_server_timeout <timeout> \
 ```
+
+#### Weight-Sync Acceleration
+Swift 3.10 optimizes weight synchronization, and setting the following parameters can further improve the weight synchronization speed for LoRA training:
+
+```bash
+# rollout(server mode)
+swift rollout \
+    --vllm_enable_lora true \
+    --vllm_max_lora_rank xxx # match the lora_rank in the training script
+    ...
+
+# grpo(colocate mode)
+swift rlhf \
+    --rlhf_type grpo \
+    --vllm_mode colocate \
+    --vllm_enable_lora true \
+    ...
+```
+Note: This optimization cannot be used in the following cases:
+
+- Training the ViT layers of multimodal models (freeze_vit set to false)
+- MoE models
+
+For implementation details, please refer to the [PR](https://github.com/modelscope/ms-swift/pull/5773)
+
 ## logged metrics
 - completions/mean_length: The average length of generated completions.
 - completions/min_length: The minimum length among generated completions.
@@ -222,6 +255,20 @@ If the `log_entropy` parameter is set, additional entropy-related metrics will b
 
 If `top_entropy_quantile` is set to a value smaller than 1.0, the entropy threshold value will also be recorded:
 - entropy/threshold: Tokens with entropy below this value will be excluded from the loss calculation.
+
+Training-inference consistency metrics, prefixed with rollout_correction (ms-swift>=3.11), requires setting `log_rollout_offpolicy_metrics=true` or `rollout_importance_sampling_mode`:
+- `kl` / `k3_kl`: KL divergence between training policy and rollout policy (direct estimator / K3 estimator)
+- `training_ppl` / `rollout_ppl`: Perplexity of training policy and rollout policy
+- `log_ppl_diff`: Log PPL difference, reflects the degree of distribution shift
+- `ppl_ratio`: PPL ratio
+- `chi2_token` / `chi2_seq`: Token/Sequence-level χ² divergence
+
+IS correction metrics (requires setting `rollout_importance_sampling_mode`):
+- `is_weight_mean`: Average importance sampling weight
+- `ess`: Effective Sample Size
+- `clipped_frac`: Fraction of samples that were truncated or masked
+
+> For detailed explanation of training-inference consistency metrics, please refer to [Training-Inference-Mismatch](../AdvancedResearch/training_inference_mismatch.md)
 
 If `log_completions` is set, the training dynamics will be saved in the output directory, including:
 - step: The training step at the time of logging.
@@ -341,3 +388,8 @@ In GRPO training, we can configure mini-batch updates in the following two ways:
 **9. How to disable the KL loss term**
 
 Set the parameter `--beta 0` to disable KL loss calculation. The reference model (ref model) will not be loaded in this case.
+
+
+## RL WeChat Group
+
+<img src="https://raw.githubusercontent.com/modelscope/ms-swift/main/docs/resources/wechat/grpo.png" width="250">

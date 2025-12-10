@@ -4,13 +4,15 @@ import socket
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
 from typing import List, Optional, Union
 from urllib.parse import urlparse
 
+import json
 import requests
 import torch
 from packaging import version
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from requests import ConnectionError
 from torch import nn
 from transformers.utils import is_torch_cuda_available
@@ -19,6 +21,7 @@ from swift.llm import AdapterRequest, RolloutInferRequest, Template
 from swift.llm.infer.protocol import ChatCompletionResponse, RequestConfig, RolloutOutput
 from swift.plugin import Metric
 from swift.utils import is_trl_available, is_vllm_ascend_available, is_vllm_available
+from .utils import peft_config_to_dict
 
 if is_vllm_available():
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
@@ -130,9 +133,14 @@ class VLLMClient:
 
         results = [None] * self.num_servers
         errors = [None] * self.num_servers
+        if isinstance(request_config, RequestConfig):
+            request_config = asdict(request_config)
 
         def process_chunk(i, chunk):
             try:
+                if len(chunk) > 0 and isinstance(chunk[0], RolloutInferRequest):
+                    chunk = [asdict(req) for req in chunk]
+
                 response = self.sessions[i].post(
                     f'{self.base_urls[i]}/infer/',
                     json={
@@ -184,9 +192,10 @@ class VLLMClient:
             rank = vllm_world_size
             kwargs = {}
             if trl_verison >= version.parse('0.20.0'):
-                if not is_torch_cuda_available():
-                    raise NotImplementedError('trl >= 0.20.0 only support CUDA deivce. Please use trl < 0.20.0')
-                client_device_uuid = str(torch.cuda.get_device_properties(device).uuid)
+                try:
+                    client_device_uuid = str(torch.cuda.get_device_properties(device).uuid)
+                except Exception:
+                    client_device_uuid = '42'
                 kwargs['client_device_uuid'] = client_device_uuid
 
             response = self.sessions[i].post(
@@ -204,7 +213,7 @@ class VLLMClient:
 
             pg = StatelessProcessGroup.create(
                 host=self.hosts[i], port=self.group_ports[i], rank=rank, world_size=world_size)
-            comm = PyNcclCommunicator(pg, device=0)
+            comm = PyNcclCommunicator(pg, device=device)
             self.pynccl_comms.append(comm)
 
         atexit.register(self.close_communicator)
@@ -229,6 +238,148 @@ class VLLMClient:
                     raise Exception(f'Server {i} update failed: {response.text}')
 
                 self.pynccl_comms[i].broadcast(weights, src=self.pynccl_comms[i].rank)
+                self.pynccl_comms[i].group.barrier()
+            except Exception as e:
+                errors[i] = e
+
+        with ThreadPoolExecutor(max_workers=self.num_servers) as executor:
+            futures = [executor.submit(_update_single_server, i) for i in range(self.num_servers)]
+            for future in futures:
+                future.result()
+
+        all_errors = [e for e in errors if e is not None]
+        if all_errors:
+            raise RuntimeError(f'Multiple errors: {all_errors}')
+
+    def update_adapter_flattened_param(self, peft_config, metadatas, flattened_tensor):
+        """
+        Adds a LoRA adapter to the model on all servers using flattened tensor.
+
+        Args:
+            peft_config: PEFT configuration for LoRA adapter.
+            metadatas: List of FlattenedTensorMetadata objects.
+            flattened_tensor: The flattened tensor containing all adapter parameters.
+        """
+        errors = [None] * self.num_servers
+        peft_config = peft_config_to_dict(peft_config)
+        metadatas = [m.model_dump() if hasattr(m, 'model_dump') else m.dict() for m in metadatas]
+        lora_int_id = int(time.time_ns() % 0x7FFFFFFF)
+
+        def _update_single_server(i):
+            try:
+                data = {
+                    'lora_int_id': lora_int_id,
+                    'peft_config': {
+                        **peft_config
+                    },
+                    'metadatas': metadatas,
+                }
+
+                response = self.sessions[i].post(
+                    f'{self.base_urls[i]}/update_adapter_flattened_param/',
+                    json=data,
+                )
+                if response.status_code != 200:
+                    raise Exception(f'Server {i} update adapter failed: {response.text}')
+
+                self.pynccl_comms[i].broadcast(flattened_tensor, src=self.pynccl_comms[i].rank)
+                self.pynccl_comms[i].group.barrier()
+            except Exception as e:
+                errors[i] = e
+
+        with ThreadPoolExecutor(max_workers=self.num_servers) as executor:
+            futures = [executor.submit(_update_single_server, i) for i in range(self.num_servers)]
+            for future in futures:
+                future.result()
+
+        all_errors = [e for e in errors if e is not None]
+        if all_errors:
+            raise RuntimeError(f'Multiple errors: {all_errors}')
+
+    def update_adapter_param(self, peft_config, lora_params):
+        """
+        Adds a LoRA adapter to the model on all servers without flattening.
+        Sends each tensor individually.
+
+        Args:
+            peft_config: PEFT configuration for LoRA adapter.
+            lora_params: OrderedDict of (name, tensor) pairs for LoRA parameters.
+        """
+        errors = [None] * self.num_servers
+        peft_config = peft_config_to_dict(peft_config)
+        lora_int_id = int(time.time_ns() % 0x7FFFFFFF)
+
+        # Build metadata for each tensor
+        lora_tensors_metadata = []
+        for name, param in lora_params.items():
+            metadata = {
+                'name': name,
+                'dtype': str(param.dtype),
+                'shape': tuple(param.shape),
+                'start_idx': 0,  # Not used in non-flattened mode
+                'end_idx': param.numel(),  # Not used in non-flattened mode
+                'numel': param.numel(),
+            }
+            lora_tensors_metadata.append(metadata)
+
+        def _update_single_server(i):
+            try:
+                data = {
+                    'lora_int_id': lora_int_id,
+                    'peft_config': {
+                        **peft_config
+                    },
+                    'lora_tensors_metadata': lora_tensors_metadata,
+                }
+
+                response = self.sessions[i].post(
+                    f'{self.base_urls[i]}/update_adapter_param/',
+                    json=data,
+                )
+                if response.status_code != 200:
+                    raise Exception(f'Server {i} update adapter failed: {response.text}')
+
+                # Broadcast each tensor individually
+                for name, param in lora_params.items():
+                    self.pynccl_comms[i].broadcast(param, src=self.pynccl_comms[i].rank)
+                self.pynccl_comms[i].group.barrier()
+            except Exception as e:
+                errors[i] = e
+
+        with ThreadPoolExecutor(max_workers=self.num_servers) as executor:
+            futures = [executor.submit(_update_single_server, i) for i in range(self.num_servers)]
+            for future in futures:
+                future.result()
+
+        all_errors = [e for e in errors if e is not None]
+        if all_errors:
+            raise RuntimeError(f'Multiple errors: {all_errors}')
+
+    def update_flattened_params(self, metadatas, flattened_tensor):
+        """
+        Updates model parameters using flattened tensor data.
+
+        Args:
+            metadatas: List of FlattenedTensorMetadata objects
+            flattened_tensor: The flattened tensor containing all parameters
+        """
+        errors = [None] * self.num_servers
+        metadatas = [m.model_dump() if hasattr(m, 'model_dump') else m.dict() for m in metadatas]
+
+        def _update_single_server(i):
+            try:
+                data = {
+                    'metadatas': metadatas,
+                }
+
+                response = self.sessions[i].post(
+                    f'{self.base_urls[i]}/update_flattened_params/',
+                    json=data,
+                )
+                if response.status_code != 200:
+                    raise Exception(f'Server {i} update flattened params failed: {response.text}')
+
+                self.pynccl_comms[i].broadcast(flattened_tensor, src=self.pynccl_comms[i].rank)
                 self.pynccl_comms[i].group.barrier()
             except Exception as e:
                 errors[i] = e
@@ -274,7 +425,8 @@ class VLLMClient:
         result = response.json()
         self.use_async_engine = result['engine_type'] == 'AsyncLLMEngine'
         self.enable_multi_turn = result.get('enable_multi_turn', False)
-        self.use_gym_env = result.get('gym_env', False)
+        self.use_gym_env = result.get('use_gym_env', False)
+        self.enable_lora = result.get('enable_lora', False)
         return result
 
     def close_communicator(self):

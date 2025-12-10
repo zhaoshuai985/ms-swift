@@ -1,8 +1,11 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
+import os
 import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import List, Literal, Optional
+
+from datasets import load_from_disk
 
 from swift.llm.utils import update_generation_config_eos_token
 from swift.plugin import extra_tuners
@@ -142,11 +145,29 @@ def prepare_adapter(args, model, adapters=None):
 
 
 def prepare_model_template(args, **kwargs):
+    adapters = kwargs.get('adapters')
     model, processor = args.get_model_processor(**kwargs)
     template = args.get_template(processor)
     if model is not None:
         if template.use_model:
             template.model = model
-        model = prepare_adapter(args, model)
+        model = prepare_adapter(args, model, adapters=adapters)
         update_generation_config_eos_token(model.generation_config, template)
     return model, template
+
+
+def _select_dataset(dataset, max_length):
+    idxs = [i for i, length in enumerate(dataset['length']) if length <= max_length]
+    new_dataset = dataset.select(idxs)
+    if len(new_dataset) < len(dataset):
+        logger.info(f'Dataset filtered, origin length: {len(dataset)}, filtered dataset length: {len(new_dataset)}')
+    return new_dataset
+
+
+def get_cached_dataset(args):
+    train_datasets, val_datasets = [], []
+    for train_path in args.cached_dataset:
+        train_datasets.append(_select_dataset(load_from_disk(train_path), args.max_length))
+    for val_path in args.cached_val_dataset:
+        val_datasets.append(_select_dataset(load_from_disk(val_path), args.max_length))
+    return train_datasets, val_datasets

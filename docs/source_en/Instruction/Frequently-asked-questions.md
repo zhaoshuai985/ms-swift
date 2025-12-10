@@ -71,7 +71,7 @@ See [issue](https://github.com/modelscope/ms-swift/issues/1813).
 `swift sft` uses `torchrun`.
 
 ### Q21: I have a question about my SFT dataset being too large; tokenizing takes a long time. Is there a solution?
-Use `lazy_tokenize`or stream reading (`streaming`). See [Command Line Parameters documentation](https://swift.readthedocs.io/zh-cn/latest/Instruction/%E5%91%BD%E4%BB%A4%E8%A1%8C%E5%8F%82%E6%95%B0.html).
+Use `lazy_tokenize`or stream reading (`streaming`). See [Command Line Parameters documentation](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html).
 
 ### Q22: When two datasets are simply appended together in the training set, does the model shuffle internally during training, or does it take data in order to train?
 Command-line parameter `dataset_shuffle`. For more details, see the [command-line parameters documentation](https://swift.readthedocs.io/en/latest/Instruction/Command-line-parameters.html).
@@ -760,7 +760,7 @@ RAY_memory_monitor_refresh_ms=0 CUDA_VISIBLE_DEVICES=1 nohup swift deploy --ckpt
 Parameters need to be passed from the client side, `request_config = RequestConfig(..., logprobs=True, top_logprobs=2)`.
 
 ### Q12: Can we set request timeout time for Swift3.0 deployment inference? What happens if the image URL is invalid?
-You can set the `TIMEOUT` environment variable, which defaults to 300 seconds. Alternatively, you can pass parameters in `InferClient`.
+You can set the `SWIFT_TIMEOUT` environment variable. Alternatively, you can pass parameters in `InferClient`.
 
 ### Q13: Why can't I get streaming generation with Swift deployed models? I've set stream to True on both server and client side, but it's still not streaming
 It's controlled by the client side. Please check [examples/deploy/client](https://github.com/modelscope/ms-swift/tree/main/examples/deploy/client).
@@ -840,7 +840,7 @@ swift eval --model_type 'qwen2_5-1_5b-instruct' --eval_dataset no --custom_eval_
 This relies on the nltk package, which needs to download a punkt_tab zip file. Some environments in China have unstable or failed downloads. The code has been modified to handle this issue; reference [issue](https://github.com/nltk/nltk/issues/3293).
 
 ### Q6: The model after eval fine-tuning keeps stopping at a fixed percentage, but the vllm service seems to be running normally. The larger the model, the sooner it disconnects.
-Set the `TIMEOUT` environment variable to -1.
+Set the `SWIFT_TIMEOUT` environment variable to -1.
 
 ### Q7: Does evalscope support multi-model comparison?
 See the [documentation](https://evalscope.readthedocs.io/en/latest/user_guides/arena.html) for details.

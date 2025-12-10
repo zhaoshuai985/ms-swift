@@ -15,11 +15,10 @@ from PIL import Image
 
 from swift.llm import ModelType, to_device
 from ..constant import MegatronModelType
-from ..gpt.hf2mcore import set_layer_state as set_layer_state_hf2mcore
-from ..gpt.mcore2hf import set_layer_state as set_layer_state_mcore2hf
+from ..gpt_bridge import GPTBridge, MultimodalGPTBridge
 from ..mm_gpt_model import MultimodalGPTModel
-from ..register import register_megatron_model
-from .utils import HuggingFaceModule, MMGPTMegatronModelMeta
+from ..register import MegatronModelMeta, register_megatron_model
+from .utils import HuggingFaceModule
 
 te_checkpoint = None
 
@@ -34,51 +33,17 @@ if HAVE_TE:
     from megatron.core.extensions.transformer_engine import te_checkpoint
 
 
-def convert_hf2mcore_qwen3_omni(hf_model, mg_model):
-    language_model = hf_model.thinker.model
-    mg_language_model = mg_model.language_model
-    args = get_args()
-    mg_language_model.embedding.word_embeddings.weight.data.copy_(language_model.embed_tokens.weight)
-    if args.untie_embeddings_and_output_weights:
-        mg_language_model.output_layer.weight.data.copy_(hf_model.thinker.lm_head.weight)
-    mg_language_model.decoder.final_layernorm.weight.data.copy_(language_model.norm.weight)
-    for layer_idx in range(args.num_layers):
-        set_layer_state_hf2mcore(args, mg_language_model, language_model, layer_idx)
-    mg_model.visual.thinker.visual.load_state_dict(hf_model.thinker.visual.state_dict())
-    mg_model.visual.thinker.audio_tower.load_state_dict(hf_model.thinker.audio_tower.state_dict())
-
-
-def convert_mcore2hf_qwen3_omni(hf_model, mg_model):
-    language_model = hf_model.thinker.model
-    mg_language_model = mg_model.language_model
-    args = get_args()
-    language_model.embed_tokens.weight.data.copy_(mg_language_model.embedding.word_embeddings.weight)
-    if args.untie_embeddings_and_output_weights:
-        lm_head_weight = (
-            hf_model.thinker.score.weight if args.task_type == 'seq_cls' else hf_model.thinker.lm_head.weight)
-        lm_head_weight.data.copy_(mg_language_model.output_layer.weight)
-    language_model.norm.weight.data.copy_(mg_language_model.decoder.final_layernorm.weight)
-    for layer_idx in range(args.num_layers):
-        set_layer_state_mcore2hf(args, mg_language_model, language_model, layer_idx)
-    hf_model.thinker.visual.load_state_dict(mg_model.visual.thinker.visual.state_dict())
-    hf_model.thinker.audio_tower.load_state_dict(mg_model.visual.thinker.audio_tower.state_dict())
-
-
 class Qwen3Omni_Vit(HuggingFaceModule):
-    module_mapping = {
-        'thinker': 'thinker',
-    }
+    module_mapping = {'thinker': 'thinker', 'talker': 'talker', 'code2wav': 'code2wav'}
     _vision_tower = ['thinker.audio_tower', 'thinker.visual']
     _aligner = [
         'thinker.audio_tower.proj1', 'thinker.audio_tower.proj2', 'thinker.visual.merger', 'thinker.visual.merger_list'
     ]
+    _generator = ['talker', 'code2wav']
 
     def __init__(self, config):
-        from transformers.models.qwen3_omni_moe import (Qwen3OmniMoeThinkerTextModel,
-                                                        Qwen3OmniMoeTalkerForConditionalGeneration,
-                                                        Qwen3OmniMoeCode2Wav)
-        super().__init__(
-            config, [Qwen3OmniMoeThinkerTextModel, Qwen3OmniMoeTalkerForConditionalGeneration, Qwen3OmniMoeCode2Wav])
+        from transformers.models.qwen3_omni_moe import Qwen3OmniMoeThinkerTextModel
+        super().__init__(config, [Qwen3OmniMoeThinkerTextModel])
 
     def prepare_model(self, hf_model):
         del self.thinker.model
@@ -99,9 +64,9 @@ class Qwen3Omni_Vit(HuggingFaceModule):
             media_inputs = processor.image_processor(images=images, return_tensors='pt')
             media_inputs = to_device(media_inputs, input_ids.device)
             pixel_values = media_inputs['pixel_values'].type(dtype)
-            image_embeds = visual(pixel_values, grid_thw=media_inputs['image_grid_thw'])[0]
+            image_embeds, deepstack_visual_embeds = visual(pixel_values, grid_thw=media_inputs['image_grid_thw'])
+            deepstack_visual_embeds = torch.stack(deepstack_visual_embeds, dim=0)
             inputs_embeds = inputs_embeds + image_embeds.mean().to(device=inputs_embeds.device) * 0.
-            deepstack_visual_embeds = None
             visual_pos_masks = None
         else:
             if pixel_values is None:
@@ -115,7 +80,6 @@ class Qwen3Omni_Vit(HuggingFaceModule):
                 grid_thw = torch.concat([image_grid_thw, video_grid_thw], dim=0)
             pixel_values_mixed = pixel_values_mixed.type(dtype)
             mixed_embeds, deepstack_visual_embeds = visual(pixel_values_mixed, grid_thw=grid_thw)
-            deepstack_visual_embeds = torch.stack(deepstack_visual_embeds, dim=0)
             if pixel_values is None:
                 image_embeds = None
                 video_embeds = mixed_embeds
@@ -139,7 +103,21 @@ class Qwen3Omni_Vit(HuggingFaceModule):
                 video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
                 video_mask = video_mask.to(inputs_embeds.device)
                 inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
-            visual_pos_masks = image_mask[..., 0] | video_mask[..., 0]
+            image_mask, video_mask = image_mask[..., 0], video_mask[..., 0]
+            visual_pos_masks = image_mask | video_mask
+            if image_embeds is not None and video_embeds is not None:
+                deepstack_image_embeds = [tensor[:image_tokens] for tensor in deepstack_visual_embeds]
+                deepstack_video_embeds = [tensor[image_tokens:] for tensor in deepstack_visual_embeds]
+                deepstack_visual_embeds = []
+                image_mask_joint = image_mask[visual_pos_masks]
+                video_mask_joint = video_mask[visual_pos_masks]
+                for img_embed, vid_embed in zip(deepstack_image_embeds, deepstack_video_embeds):
+                    embed_joint = img_embed.new_zeros(visual_pos_masks.sum(), img_embed.shape[-1]).to(img_embed.device)
+                    embed_joint[image_mask_joint, :] = img_embed
+                    embed_joint[video_mask_joint, :] = vid_embed
+                    deepstack_visual_embeds.append(embed_joint)
+
+            deepstack_visual_embeds = torch.stack(deepstack_visual_embeds, dim=0)
             visual_pos_masks = visual_pos_masks.transpose(0, 1)
             # compat cp
             args = get_args()
@@ -456,6 +434,8 @@ class Qwen3VLTransformerBlock(gpt_model.TransformerBlock):
 
     def _deepstack_process(self, hidden_states: torch.Tensor, visual_pos_masks: torch.Tensor,
                            visual_embeds: torch.Tensor):
+        if visual_pos_masks is None:
+            return hidden_states + visual_embeds.mean() * 0
         visual_pos_masks = visual_pos_masks.to(hidden_states.device)
         visual_embeds = visual_embeds.to(hidden_states.device, hidden_states.dtype)
         local_this = hidden_states[visual_pos_masks, :].clone() + visual_embeds
@@ -476,46 +456,26 @@ class Qwen3VLGPTModel(MultimodalGPTModel):
         super().__init__(*args, **kwargs)
 
 
+class Qwen3OmniBridge(GPTBridge):
+    hf_layers_prefix = 'thinker.model.layers'
+    hf_embed_key = 'thinker.model.embed_tokens.weight'
+    hf_final_layernorm_key = 'thinker.model.norm.weight'
+    hf_lm_head_key = 'thinker.lm_head.weight'
+    hf_score_key = 'thinker.score.weight'
+
+
 register_megatron_model(
-    MMGPTMegatronModelMeta(
+    MegatronModelMeta(
         MegatronModelType.qwen3_omni, [
             ModelType.qwen3_omni,
         ],
-        convert_hf2mcore=convert_hf2mcore_qwen3_omni,
-        convert_mcore2hf=convert_mcore2hf_qwen3_omni,
         model_cls=Qwen3VLGPTModel,
+        bridge_cls=Qwen3OmniBridge,
         visual_cls=Qwen3Omni_Vit))
 
 
-def convert_hf2mcore_qwen3_vl(hf_model, mg_model):
-    language_model = hf_model.model.language_model
-    mg_language_model = mg_model.language_model
-    args = get_args()
-    mg_language_model.embedding.word_embeddings.weight.data.copy_(language_model.embed_tokens.weight)
-    if args.untie_embeddings_and_output_weights:
-        mg_language_model.output_layer.weight.data.copy_(hf_model.lm_head.weight)
-    mg_language_model.decoder.final_layernorm.weight.data.copy_(language_model.norm.weight)
-    for layer_idx in range(args.num_layers):
-        set_layer_state_hf2mcore(args, mg_language_model, language_model, layer_idx)
-    mg_model.visual.visual.load_state_dict(hf_model.model.visual.state_dict())
-
-
-def convert_mcore2hf_qwen3_vl(hf_model, mg_model):
-    language_model = hf_model.model.language_model
-    mg_language_model = mg_model.language_model
-    args = get_args()
-    language_model.embed_tokens.weight.data.copy_(mg_language_model.embedding.word_embeddings.weight)
-    if args.untie_embeddings_and_output_weights:
-        lm_head_weight = hf_model.score.weight if args.task_type == 'seq_cls' else hf_model.lm_head.weight
-        lm_head_weight.data.copy_(mg_language_model.output_layer.weight)
-    language_model.norm.weight.data.copy_(mg_language_model.decoder.final_layernorm.weight)
-    for layer_idx in range(args.num_layers):
-        set_layer_state_mcore2hf(args, mg_language_model, language_model, layer_idx)
-    hf_model.model.visual.load_state_dict(mg_model.visual.visual.state_dict())
-
-
 class Qwen3VL_Vit(HuggingFaceModule):
-    module_mapping = {'visual': 'visual'}
+    module_mapping = {'model.visual': 'visual'}
     _vision_tower = ['visual']
     _aligner = ['visual.merger', 'visual.deepstack_merger_list']
 
@@ -529,12 +489,11 @@ class Qwen3VL_Vit(HuggingFaceModule):
 
 
 register_megatron_model(
-    MMGPTMegatronModelMeta(
+    MegatronModelMeta(
         MegatronModelType.qwen3_vl, [
             ModelType.qwen3_vl,
             ModelType.qwen3_moe_vl,
         ],
-        convert_hf2mcore=convert_hf2mcore_qwen3_vl,
-        convert_mcore2hf=convert_mcore2hf_qwen3_vl,
         model_cls=Qwen3VLGPTModel,
+        bridge_cls=MultimodalGPTBridge,
         visual_cls=Qwen3VL_Vit))

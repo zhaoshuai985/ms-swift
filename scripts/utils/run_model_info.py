@@ -28,7 +28,10 @@ def get_cache_mapping(fpath):
 
 
 def get_model_info_table():
-    fpaths = ['docs/source/Instruction/支持的模型和数据集.md', 'docs/source_en/Instruction/Supported-models-and-datasets.md']
+    fpaths = [
+        'docs/source/Instruction/Supported-models-and-datasets.md',
+        'docs/source_en/Instruction/Supported-models-and-datasets.md'
+    ]
     cache_mapping = get_cache_mapping(fpaths[0])
     end_words = [['### 多模态大模型', '## 数据集'], ['### Multimodal large models', '## Datasets']]
     result = [
@@ -64,10 +67,13 @@ def get_model_info_table():
                 if is_megatron_available():
                     from swift.megatron import model
                     support_megatron = getattr(model_meta, 'support_megatron', False)
-                    for word in ['gptq', 'awq', 'bnb', 'aqlm', 'int4', 'int8', 'nf4', 'fp8']:
+                    for word in ['gptq', 'awq', 'bnb', 'aqlm', 'int4', 'int8', 'nf4']:
                         if word in ms_model_id.lower():
                             support_megatron = False
                             break
+                    if support_megatron and 'fp8' in ms_model_id.lower() and not any(
+                            word in ms_model_id.lower() for word in ['qwen', 'longcat', 'intern']):
+                        support_megatron = False
                     support_megatron = '&#x2714;' if support_megatron else '&#x2718;'
                 else:
                     support_megatron = cache_mapping.get(ms_model_id, '&#x2718;')

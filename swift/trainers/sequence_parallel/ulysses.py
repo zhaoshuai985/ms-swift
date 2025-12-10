@@ -1,6 +1,7 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 import math
 from functools import partial
+from types import MethodType, SimpleNamespace
 from typing import Any, Optional, Tuple
 
 import torch
@@ -118,6 +119,9 @@ class DistributedAttention(torch.nn.Module):
 
     def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attention_mask: torch.Tensor,
                 *args: Any, **kwargs) -> torch.Tensor:
+        if self.sequence_parallel.world_size == 1:
+            return self.local_attn(query, key, value, attention_mask, *args, **kwargs)
+
         # gather ulysses first, ring-attention next
         if self.sequence_parallel.sp_world_size > 1:
             query_layer = _SeqAllToAll.apply(self.sequence_parallel.sp_group, query, self.scatter_idx, self.gather_idx)
@@ -183,6 +187,8 @@ class SequenceParallel:
         try:
             from transformers import masking_utils
 
+            _origin_flash_attention_mask = masking_utils.flash_attention_mask
+
             def flash_attention_mask(batch_size,
                                      cache_position,
                                      kv_length,
@@ -190,6 +196,9 @@ class SequenceParallel:
                                      mask_function=masking_utils.causal_mask_function,
                                      attention_mask=None,
                                      **kwargs):
+                if self.world_size == 1:
+                    return _origin_flash_attention_mask(batch_size, cache_position, kv_length, kv_offset, mask_function,
+                                                        attention_mask, **kwargs)
                 if attention_mask is not None:
                     if attention_mask.all():
                         attention_mask = None
@@ -199,7 +208,30 @@ class SequenceParallel:
             masking_utils.flash_attention_mask = flash_attention_mask
             masking_utils.ALL_MASK_ATTENTION_FUNCTIONS._global_mapping['flash_attention_2'] = flash_attention_mask
 
+            def sdpa_mask(batch_size, cache_position, kv_length, *args, **kwargs):
+                if self.world_size == 1:
+                    return masking_utils.ALL_MASK_ATTENTION_FUNCTIONS._global_mapping['sdpa_origin'](batch_size,
+                                                                                                     cache_position,
+                                                                                                     kv_length, *args,
+                                                                                                     **kwargs)
+                device = cache_position.device
+                cache_position = self.real_position_ids[0]
+                cache_position = self.pad(cache_position, padding_value=-1, position_ids=self.real_position_ids, dim=0)
+                cache_position = torch.arange(0, cache_position.shape[0], device=device)
+                kv_length = cache_position.shape[0]
+                return masking_utils.ALL_MASK_ATTENTION_FUNCTIONS._global_mapping['sdpa_origin'](batch_size,
+                                                                                                 cache_position,
+                                                                                                 kv_length, *args,
+                                                                                                 **kwargs)
+
+            masking_utils.ALL_MASK_ATTENTION_FUNCTIONS._global_mapping[
+                'sdpa_origin'] = masking_utils.ALL_MASK_ATTENTION_FUNCTIONS._global_mapping['sdpa']
+            masking_utils.ALL_MASK_ATTENTION_FUNCTIONS._global_mapping['sdpa'] = sdpa_mask
+
             def create_causal_mask(config, input_embeds, attention_mask, cache_position, *args, **kwargs):
+                if self.world_size == 1:
+                    return masking_utils.origin_create_causal_mask(config, input_embeds, attention_mask, cache_position,
+                                                                   *args, **kwargs)
                 input_embeds = torch.ones(
                     (input_embeds.shape[0], input_embeds.shape[1] * self.sp_world_size, input_embeds.shape[2]),
                     dtype=input_embeds.dtype,
@@ -227,9 +259,14 @@ class SequenceParallel:
             from transformers.modeling_flash_attention_utils import _flash_attention_forward
             _distributed_flash_attention = DistributedAttention(_flash_attention_forward, self)
 
+            modeling_flash_attention_utils._flash_attention_forward_origin = _flash_attention_forward
+
             def flash_attention_forward(query_states: torch.Tensor, key_states: torch.Tensor,
                                         value_states: torch.Tensor, attention_mask: Optional[torch.Tensor], q_len,
                                         *args, **kwargs):
+                if self.world_size == 1:
+                    return _flash_attention_forward(query_states, key_states, value_states, attention_mask, q_len,
+                                                    *args, **kwargs)
                 return _distributed_flash_attention(query_states, key_states, value_states, attention_mask,
                                                     q_len * self.sp_world_size, *args, **kwargs)
 
@@ -239,7 +276,7 @@ class SequenceParallel:
 
         def local_flash_attn(module: torch.nn.Module, query_states, key_states, value_states, attention_mask, *args,
                              dist_attn, **kwargs):
-            if module.__class__ not in [m.__class__ for m in text_model.modules()]:
+            if self.world_size == 1 or module.__class__ not in [m.__class__ for m in text_model.modules()]:
                 return ALL_ATTENTION_FUNCTIONS['flash_attention_2_origin'](module, query_states, key_states,
                                                                            value_states, attention_mask, *args,
                                                                            **kwargs)
@@ -301,7 +338,8 @@ class SequenceParallel:
 
         def local_sdpa_attn(module: torch.nn.Module, query_states, key_states, value_states, attention_mask, *args,
                             dist_attn, **kwargs):
-            if module.__class__ not in [m.__class__ for m in text_model.modules()]:
+            # Bypass SP logic when world_size == 1 (SP disabled) or module not in text_model
+            if self.world_size == 1 or module.__class__ not in [m.__class__ for m in text_model.modules()]:
                 return ALL_ATTENTION_FUNCTIONS['sdpa_origin'](module, query_states, key_states, value_states,
                                                               attention_mask, *args, **kwargs)
             if dist_attn.local_attn is None:
@@ -328,6 +366,8 @@ class SequenceParallel:
     def _prepare_forward_hook(self, base_model: torch.nn.Module):
 
         def pre_forward_split_hook(_self, args, kwargs):
+            if self.world_size == 1:
+                return args, kwargs
             input_ids = kwargs.get('input_ids', None)
             inputs_embeds = kwargs.get('inputs_embeds', None)
             position_ids = kwargs['position_ids']
@@ -336,7 +376,7 @@ class SequenceParallel:
                 embed_tokens = getattr(_self.language_model, 'embed_tokens', None)
             else:
                 embed_tokens = getattr(_self, 'embed_tokens', None)
-            input_ids, inputs_embeds, _, position_ids, attention_mask, _ = self.pad_and_split_inputs(
+            input_ids, inputs_embeds, _, position_ids, attention_mask, _, _ = self.pad_and_split_inputs(
                 input_ids,
                 inputs_embeds,
                 None,
@@ -361,18 +401,27 @@ class SequenceParallel:
                 return output
 
             attention_mask = kwargs['attention_mask']
-            num_layers = len(router_logits)
-            sp_len = router_logits[0].shape[0]
-            if isinstance(router_logits, tuple):
-                compute_device = router_logits[0].device
-                router_logits = torch.cat([layer_gate.to(compute_device) for layer_gate in router_logits], dim=0)
-            router_logits, _ = GatherLoss.apply(router_logits, None)
-            router_logits = router_logits.reshape(self.sp_world_size, num_layers, sp_len,
-                                                  -1).transpose(0, 1).reshape(num_layers, self.sp_world_size * sp_len,
-                                                                              -1)
-            if attention_mask is not None:
-                router_logits = router_logits[:, :attention_mask.shape[1], :]
-            output['router_logits'] = tuple([logit.squeeze() for logit in router_logits.split(1, dim=0)])
+            if attention_mask is None:
+                batch_size = 1
+            else:
+                batch_size = attention_mask.shape[0]
+
+            assert router_logits[0].shape[0] % batch_size == 0
+            seq_len = router_logits[0].shape[0] // batch_size
+
+            _gathered_logits = []
+            for i in range(batch_size):
+                _slice = slice(i * seq_len, (i + 1) * seq_len)
+                _bs_logits = [logit[_slice] for logit in router_logits]
+                compute_device = _bs_logits[0].device
+                _bs_logits = torch.stack([layer_gate.to(compute_device) for layer_gate in _bs_logits], dim=0)
+                _bs_logits, _ = GatherLoss.apply(_bs_logits, None, 1, self.real_position_ids)
+                _gathered_logits.append(_bs_logits)
+            router_logits = torch.stack(_gathered_logits, dim=0)
+            if self.real_position_ids is not None:
+                router_logits = router_logits[:, :, :self.real_position_ids.shape[1], :]
+            output['router_logits'] = tuple(
+                [logit.reshape(-1, logit.shape[-1]) for logit in router_logits.split(1, dim=1)])
             return output
 
         base_model.register_forward_hook(moe_aux_loss_hook, with_kwargs=True)
@@ -401,6 +450,7 @@ class SequenceParallel:
             SequenceParallel._global_inited = True
 
         self._prepare_forward_hook(llm_model)
+
         if model.model_info.is_moe_model:
             self._prepare_moe_aux_loss(llm_model)
 
@@ -556,6 +606,27 @@ class SequenceParallel:
             output = tensor_list[rank].contiguous()
             return output
 
+    def pad_and_split_mm_tokens(self, visual_mask, mm_embeds):
+        input_ids = self.extra_kwargs['input_ids']
+        empty_embeds = torch.empty(
+            (input_ids.shape[0], input_ids.shape[1], mm_embeds.shape[-1])).to(mm_embeds.device).to(mm_embeds.dtype)
+        empty_embeds[visual_mask] = mm_embeds
+
+        embeds = SimpleNamespace(weight=mm_embeds)
+
+        _, split_input_embeds, _, _, _, _, extra_values = self.pad_and_split_inputs(
+            None,
+            empty_embeds,
+            None,
+            None,
+            None,
+            None,
+            embeds,
+            self.real_position_ids,
+            extra_split_values=[(visual_mask, 0, -1)])
+        visual_mask = extra_values[0]
+        return visual_mask, split_input_embeds[visual_mask]
+
     def pad_and_split_inputs(self,
                              input_ids,
                              input_embeds,
@@ -564,7 +635,8 @@ class SequenceParallel:
                              attention_mask,
                              loss_scale,
                              embed_tokens=None,
-                             real_position_ids=None):
+                             real_position_ids=None,
+                             extra_split_values=None):
         """Common implementation for padding and splitting inputs
 
         When a sequence comes, it will be split into rp_world_size * 2 sub tensors, and group them as the
@@ -583,14 +655,19 @@ class SequenceParallel:
             loss_scale: loss_scale
             embed_tokens: embed_tokens
             real_position_ids: the real position_ids to represent the seq length information
+            extra_split_values: List of Tuples for extra split values, e.g.: (tensor, pad_value, split_dim)
         """
         tokenizer = self.tokenizer
         real_position_ids = real_position_ids if real_position_ids is not None else position_ids
-        if real_position_ids is not None and real_position_ids.shape[0] == 1:
+        extra_values = []
+        batch_size = input_ids.shape[
+            0] if input_ids is not None else input_embeds.shape[0] if input_embeds is not None else None
+        if real_position_ids is not None and batch_size is not None and real_position_ids.shape[0] == batch_size:
             # TODO clone everytime, but the position_ids is a small tensor
             self.extra_kwargs['text_position_ids'] = real_position_ids.clone()
         if input_ids is not None:
             input_ids = self.pad(input_ids, padding_value=tokenizer.pad_token_id, position_ids=real_position_ids)
+            self.extra_kwargs['input_ids'] = input_ids.clone()
         if input_embeds is not None:
             pad_emb = torch.zeros(
                 (1, embed_tokens.weight.shape[-1])).to(embed_tokens.weight.device).to(embed_tokens.weight.dtype)
@@ -619,6 +696,10 @@ class SequenceParallel:
             if hasattr(self, 'causal_mask_func') and self.causal_mask_func is not None:
                 attention_mask = self.causal_mask_func(attention_mask, inputs.to(self.model_dtype), cache_position,
                                                        None, None)
+        if extra_split_values is not None:
+            for (tensor, pad_value, split_dim) in extra_split_values:
+                extra_values.append(
+                    self.pad(tensor, padding_value=pad_value, position_ids=real_position_ids, dim=split_dim))
         if input_ids is not None:
             input_ids = self.split(input_ids, dim=1, position_ids=real_position_ids)
         if input_embeds is not None:
@@ -632,8 +713,11 @@ class SequenceParallel:
 
         if position_ids is not None:
             position_ids = self.split(position_ids, dim=-1, position_ids=real_position_ids)
-
-        return input_ids, input_embeds, labels, position_ids, attention_mask, loss_scale
+        if extra_split_values is not None:
+            for i in range(len(extra_values)):
+                extra_values[i] = self.split(
+                    extra_values[i], dim=extra_split_values[i][2], position_ids=real_position_ids)
+        return input_ids, input_embeds, labels, position_ids, attention_mask, loss_scale, extra_values
 
     def _init_device_mesh(self):
         """Initialize device mesh for sequence and ring parallel.
@@ -706,12 +790,15 @@ class SequenceParallel:
         """
         position_ids = None
         position_ids = inputs.get('text_position_ids')
+        input_ids = inputs.get('input_ids')
         if position_ids is None:
             position_ids = inputs.get('position_ids')
-        if position_ids is not None and position_ids.shape[0] == 1:
+        if position_ids is not None and input_ids is not None and position_ids.shape[0] == input_ids.shape[0]:
             self.extra_kwargs['text_position_ids'] = position_ids.clone()
+        if input_ids is not None:
+            self.extra_kwargs['input_ids'] = input_ids.clone()
         if 'labels' in inputs:
             labels = inputs['labels']
-            _, _, labels, _, _, _ = self.pad_and_split_inputs(
+            _, _, labels, _, _, _, _ = self.pad_and_split_inputs(
                 None, None, labels, None, None, None, real_position_ids=position_ids)
             inputs['labels'] = labels

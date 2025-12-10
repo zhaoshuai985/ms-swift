@@ -72,6 +72,7 @@ class ModelMeta:
 
     is_multimodal: bool = False
     is_reward: bool = False
+    is_reranker: bool = False
     task_type: Optional[str] = None
 
     # File patterns to ignore when downloading the model.
@@ -81,10 +82,18 @@ class ModelMeta:
     tags: List[str] = field(default_factory=list)
 
     def __post_init__(self):
+        from .constant import MLLMModelType, RMModelType, RerankerModelType
         if self.template is None:
             self.template = 'dummy'
         if not isinstance(self.model_groups, (list, tuple)):
             self.model_groups = [self.model_groups]
+
+        if self.model_type in MLLMModelType.__dict__:
+            self.is_multimodal = True
+        if self.model_type in RMModelType.__dict__:
+            self.is_reward = True
+        if self.model_type in RerankerModelType.__dict__:
+            self.is_reranker = True
 
     def get_matched_model_group(self, model_name: str) -> Optional[ModelGroup]:
         for model_group in self.model_groups:
@@ -123,11 +132,6 @@ def register_model(model_meta: ModelMeta, *, exist_ok: bool = False) -> None:
     model_type = model_meta.model_type
     if not exist_ok and model_type in MODEL_MAPPING:
         raise ValueError(f'The `{model_type}` has already been registered in the MODEL_MAPPING.')
-    from .constant import MLLMModelType, RMModelType
-    if model_type in MLLMModelType.__dict__:
-        model_meta.is_multimodal = True
-    if model_type in RMModelType.__dict__:
-        model_meta.is_reward = True
     if model_meta.model_arch:
         model_meta.model_arch = get_model_arch(model_meta.model_arch)
     MODEL_MAPPING[model_type] = model_meta
@@ -208,46 +212,65 @@ def _patch_awq_compat(model_info):
         pass
 
 
-def deepspeed_set_z3_leaf_modules(model):
+def deepspeed_set_z3_leaf_modules(model, z3_leaf_modules):
     if not is_deepspeed_zero3_enabled():
         return
     try:
         architecture = model.config.architectures[0]
     except Exception:
         return
-    z3_leaf_modules = None
-    if architecture == 'Qwen3VLMoeForConditionalGeneration':
-        from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextSparseMoeBlock
-        z3_leaf_modules = [Qwen3VLMoeTextSparseMoeBlock]
-    elif architecture == 'Qwen3OmniMoeForConditionalGeneration':
-        from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import Qwen3OmniMoeThinkerTextSparseMoeBlock
-        z3_leaf_modules = [Qwen3OmniMoeThinkerTextSparseMoeBlock]
-    elif architecture == 'Qwen2MoeForCausalLM':
-        from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeSparseMoeBlock
-        z3_leaf_modules = [Qwen2MoeSparseMoeBlock]
-    elif architecture == 'Qwen3MoeForCausalLM':
-        from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
-        z3_leaf_modules = [Qwen3MoeSparseMoeBlock]
-    elif architecture == 'Glm4MoeForCausalLM':
-        from transformers.models.glm4_moe.modeling_glm4_moe import Glm4MoeMoE
-        z3_leaf_modules = [Glm4MoeMoE]
-    elif architecture == 'Glm4vMoeForConditionalGeneration':
-        from transformers.models.glm4v_moe.modeling_glm4v_moe import Glm4vMoeTextMoE
-        z3_leaf_modules = [Glm4vMoeTextMoE]
-    elif architecture == 'GptOssForCausalLM':
-        from transformers.models.gpt_oss.modeling_gpt_oss import GptOssMLP
-        z3_leaf_modules = [GptOssMLP]
-    elif architecture == 'Llama4ForCausalLM':
-        from transformers.models.llama4.modeling_llama4 import Llama4TextMoe
-        z3_leaf_modules = [Llama4TextMoe]
-    elif architecture == 'Qwen3NextForCausalLM':
-        from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextSparseMoeBlock
-        z3_leaf_modules = [Qwen3NextSparseMoeBlock]
+    if z3_leaf_modules is None:
+        if architecture == 'Qwen3VLMoeForConditionalGeneration':
+            from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextSparseMoeBlock
+            z3_leaf_modules = [Qwen3VLMoeTextSparseMoeBlock]
+        elif architecture == 'Qwen3OmniMoeForConditionalGeneration':
+            from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import Qwen3OmniMoeThinkerTextSparseMoeBlock
+            z3_leaf_modules = [Qwen3OmniMoeThinkerTextSparseMoeBlock]
+        elif architecture == 'Qwen2MoeForCausalLM':
+            from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeSparseMoeBlock
+            z3_leaf_modules = [Qwen2MoeSparseMoeBlock]
+        elif architecture == 'Qwen3MoeForCausalLM':
+            from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
+            z3_leaf_modules = [Qwen3MoeSparseMoeBlock]
+        elif architecture == 'Glm4MoeForCausalLM':
+            from transformers.models.glm4_moe.modeling_glm4_moe import Glm4MoeMoE
+            z3_leaf_modules = [Glm4MoeMoE]
+        elif architecture == 'Glm4vMoeForConditionalGeneration':
+            from transformers.models.glm4v_moe.modeling_glm4v_moe import Glm4vMoeTextMoE
+            z3_leaf_modules = [Glm4vMoeTextMoE]
+        elif architecture == 'GptOssForCausalLM':
+            from transformers.models.gpt_oss.modeling_gpt_oss import GptOssMLP
+            z3_leaf_modules = [GptOssMLP]
+        elif architecture == 'Llama4ForCausalLM':
+            from transformers.models.llama4.modeling_llama4 import Llama4TextMoe
+            z3_leaf_modules = [Llama4TextMoe]
+        elif architecture == 'Qwen3NextForCausalLM':
+            from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextSparseMoeBlock
+            z3_leaf_modules = [Qwen3NextSparseMoeBlock]
 
     if z3_leaf_modules:
         from deepspeed.utils import set_z3_leaf_modules
         set_z3_leaf_modules(model, z3_leaf_modules)
         logger.info(f'Setting z3_leaf_modules: {z3_leaf_modules}')
+
+
+def _set_property(model, key):
+    if not hasattr(model, 'model'):
+        return
+    text_model = model.model
+    if not hasattr(text_model, key):
+        return
+
+    def _value(self):
+        return getattr(text_model, key)
+
+    setattr(model.__class__, key, property(_value))
+
+
+def _compat_transformers5(model, model_meta):
+    if model_meta.is_multimodal:
+        for key in ['language_model', 'vision_tower', 'multi_modal_projector', 'visual', 'vision_model']:
+            _set_property(model, key)
 
 
 def get_model_tokenizer_from_local(model_dir: str,
@@ -300,6 +323,10 @@ def get_model_tokenizer_from_local(model_dir: str,
 
     if model_info.quant_method == 'fp8':
         torch_dtype = 'auto'
+    if version.parse(transformers.__version__) >= version.parse('4.56'):
+        model_kwargs['dtype'] = torch_dtype
+    else:
+        model_kwargs['torch_dtype'] = torch_dtype
     model = None
     if load_model:
         _patch_awq_compat(model_info)
@@ -308,11 +335,12 @@ def get_model_tokenizer_from_local(model_dir: str,
             with patch_automodel_for_sequence_classification(model_config=model_config, patch_from_pretrained=False):
                 try:
                     model = AutoModelForSequenceClassification.from_pretrained(
-                        model_dir, config=model_config, torch_dtype=torch_dtype, trust_remote_code=True, **model_kwargs)
+                        model_dir, config=model_config, trust_remote_code=True, **model_kwargs)
                 except ValueError:
                     model = None
 
         automodel_class = automodel_class or AutoModelForCausalLM
+        model_meta = kwargs['model_meta']
         context_kwargs = {
             'model_info': model_info,
             'model_meta': model_meta,
@@ -329,19 +357,15 @@ def get_model_tokenizer_from_local(model_dir: str,
                                'ignore_mismatched_sizes will be set to True')
                 model_kwargs['ignore_mismatched_sizes'] = True
                 context = partial(patch_automodel_for_sequence_classification, **context_kwargs)
-            elif model_info.task_type == 'reranker':
+            elif model_info.task_type == 'reranker' and not model_meta.is_reranker:
                 # For reranker task, patch CausalLM to SequenceClassification with num_labels=1
                 logger.info('Converting CausalLM to SequenceClassification for reranker task with num_labels=1')
                 context = partial(patch_automodel_for_sequence_classification, **context_kwargs)
-            elif model_info.task_type == 'generative_reranker':
-                # For generative reranker, keep CausalLM structure unchanged
-                logger.info('Loading model as CausalLM for generative_reranker task')
-                context = partial(patch_automodel, **context_kwargs)
             else:
                 context = partial(patch_automodel, **context_kwargs)
             with context():
                 model = automodel_class.from_pretrained(
-                    model_dir, config=model_config, torch_dtype=torch_dtype, trust_remote_code=True, **model_kwargs)
+                    model_dir, config=model_config, trust_remote_code=True, **model_kwargs)
 
         # fix not save modeling_xxx.py (transformers 4.45)
         # https://github.com/huggingface/transformers/issues/24737
@@ -374,8 +398,9 @@ def get_model_tokenizer_from_local(model_dir: str,
         HfConfigFactory.set_model_config_attr(model, 'pad_token_id', pad_token)
         if leaf_modules is not None or model_info.is_moe_model:
             # deepspeed zero3
-            deepspeed_set_z3_leaf_modules(model)
-
+            deepspeed_set_z3_leaf_modules(model, leaf_modules)
+    if version.parse(transformers.__version__) >= version.parse('5.0.0.dev'):
+        _compat_transformers5(model, model_meta)
     return model, tokenizer
 
 
@@ -580,6 +605,7 @@ def _get_model_info(model_dir: str, model_type: Optional[str], quantization_conf
     max_model_len = HfConfigFactory.get_max_model_len(config)
     rope_scaling = HfConfigFactory.get_config_attr(config, 'rope_scaling')
     is_moe_model = HfConfigFactory.is_moe_model(config)
+    is_multimodal = HfConfigFactory.is_multimodal(config)
 
     if model_type is None:
         model_type = _read_args_json_model_type(model_dir)
@@ -587,8 +613,9 @@ def _get_model_info(model_dir: str, model_type: Optional[str], quantization_conf
         architectures = HfConfigFactory.get_config_attr(config, 'architectures')
         model_types = get_matched_model_types(architectures)
         if len(model_types) > 1:
-            raise ValueError('Please explicitly pass the model_type. For reference, '
-                             f'the available model_types: {model_types}.')
+            raise ValueError('Failed to automatically match `model_type`. '
+                             f'Please explicitly pass the `model_type` for `{model_dir}`. '
+                             f'Recommended `model_types` include: {model_types}.')
         elif len(model_types) == 1:
             model_type = model_types[0]
     elif model_type not in MODEL_MAPPING:
@@ -603,6 +630,7 @@ def _get_model_info(model_dir: str, model_type: Optional[str], quantization_conf
         quant_info.get('quant_bits'),
         rope_scaling=rope_scaling,
         is_moe_model=is_moe_model,
+        is_multimodal=is_multimodal,
     )
     return res
 
@@ -639,9 +667,13 @@ def get_model_info_meta(
     if model_type is not None:
         model_meta = MODEL_MAPPING[model_type]
     if model_meta is None:
-        model_meta = ModelMeta(None, [], 'dummy', get_model_tokenizer_from_local, model_arch=None)
-        logger.info(f'Temporarily create model_meta: {model_meta}')
-
+        if model_info.is_multimodal:
+            raise ValueError(f'Model "{model_id_or_path}" is not supported because no suitable `model_type` was found. '
+                             'Please refer to the documentation and specify an appropriate `model_type` manually: '
+                             'https://swift.readthedocs.io/en/latest/Instruction/Supported-models-and-datasets.html')
+        else:
+            model_meta = ModelMeta(None, [], 'dummy', get_model_tokenizer_from_local, model_arch=None)
+            logger.info(f'Temporarily create model_meta: {model_meta}')
     if torch_dtype is None:
         torch_dtype = model_meta.torch_dtype or get_default_torch_dtype(model_info.torch_dtype)
         logger.info(f'Setting torch_dtype: {torch_dtype}')
@@ -761,7 +793,7 @@ def get_model_tokenizer(
         if num_new_tokens > 0:
             logger.info(f'Added {num_new_tokens} new special tokens.')
 
-            if model is not None:
+            if model is not None and not return_dummy_model:
                 llm_model = get_lm_head_model(model, model_meta)
                 origin_vocab_size = HfConfigFactory.get_config_attr(llm_model.config, 'vocab_size')
                 if origin_vocab_size < len(tokenizer):

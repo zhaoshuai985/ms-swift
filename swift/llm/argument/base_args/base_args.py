@@ -15,6 +15,7 @@ from .data_args import DataArguments
 from .generation_args import GenerationArguments
 from .model_args import ModelArguments
 from .quant_args import QuantizeArguments
+from .ray_args import RayArguments
 from .template_args import TemplateArguments
 
 logger = get_logger()
@@ -52,24 +53,46 @@ class CompatArguments:
 
 @dataclass
 class BaseArguments(CompatArguments, GenerationArguments, QuantizeArguments, DataArguments, TemplateArguments,
-                    ModelArguments):
-    """
-    BaseArguments class is a dataclass that inherits from multiple argument classes:
-    GenerationArguments, QuantizeArguments, DataArguments, TemplateArguments, ModelArguments.
+                    ModelArguments, RayArguments):
+    """BaseArguments class is a dataclass that inherits from multiple argument classes.
+
+    This class consolidates arguments from CompatArguments, GenerationArguments, QuantizeArguments, DataArguments,
+    TemplateArguments, ModelArguments, RayArguments.
 
     Args:
-        tuner_backend(str): Support peft or unsloth.
-        train_type(str): The training type, support all supported tuners and `full`.
-        seed (int): Random seed for reproducibility. Default is 42.
-        model_kwargs (Optional[str]): Additional keyword arguments for the model. Default is None.
-        load_data_args (bool): Flag to determine if dataset configuration should be loaded. Default is False.
-        packing (bool): Flag to enable packing of datasets. Default is False.
-        lazy_tokenize (Optional[bool]): Flag to enable lazy tokenization. Default is None.
-        use_hf (bool): Flag to determine if Hugging Face should be used. Default is False.
-        hub_token (Optional[str]): SDK token for authentication. Default is None.
-        custom_register_path (List[str]): Path to custom .py file for dataset registration. Default is None.
-        ignore_args_error (bool): Flag to ignore argument errors for notebook compatibility. Default is False.
-        use_swift_lora (bool): Use swift lora, a compatible argument
+        tuner_backend (str): The tuner backend to use. Choices are 'peft' or 'unsloth'. Default is 'peft'.
+        train_type (str): The training type. Choices include 'lora', 'full', 'longlora', 'adalora', 'llamapro',
+            'adapter', 'vera', 'boft', 'fourierft', 'reft'. Default is 'lora'.
+        adapters (List[str]): A list of adapter IDs or paths. This is typically used for inference or deployment.
+            It can also resume training by only loading adapter weights, differing from `resume_from_checkpoint`
+            which also loads optimizer states. Default is [].
+        external_plugins (List[str]): A list of external 'plugin.py' files to be registered and imported into
+            the plugin module. Default is [].
+        seed (int): The global random seed for reproducibility. Note that this does not affect `data_seed`,
+            which controls dataset randomization. Default is 42.
+        model_kwargs (Optional[str]): Additional keyword arguments for specific models, passed as a JSON string
+            (e.g., '{"key": "value"}'). It's recommended to use the same arguments for inference as for training.
+            Default is None.
+        load_args (bool): Whether to load `args.json` from a checkpoint when using `--resume_from_checkpoint`,
+            `--model`, or `--adapters`. Defaults to True for inference/export and False for training. Usually,
+            this does not need to be modified. Default is True.
+        load_data_args (bool): If True, will also load data-related arguments from `args.json`. This is useful
+            for running inference on the same validation split used during training. Default is False.
+        packing (bool): Whether to enable packing of datasets. Default is False.
+        packing_length (Optional[int]): Length of packing. Default is None.
+        packing_num_proc (int): Number of processes used for packing, Default is 1.
+        lazy_tokenize (Optional[bool]): Whether to enable lazy tokenization. Default is None.
+        custom_register_path (List[str]): A list of paths to custom `.py` files for registering custom models,
+            dialogue templates, and datasets. These files will be imported. Default is [].
+        use_hf (bool): Whether to use Hugging Face for downloading/uploading models and datasets. If False,
+            ModelScope is used. Default is False.
+        hub_token (Optional[str]): The authentication token for ModelScope or Hugging Face Hub. Default is None.
+        ddp_timeout (int): Timeout for DDP (Distributed Data Parallel) operations, in seconds. Default is 18000000.
+        ddp_backend (Optional[str]): The backend for DDP. Choices include "nccl", "gloo", "mpi", "ccl", "hccl",
+            "cncl", "mccl". If None, it will be automatically selected. Default is None.
+        ignore_args_error (bool): Whether to ignore argument errors. This is useful for compatibility with Jupyter
+            notebooks. Default is False.
+        use_swift_lora (bool): Whether to use swift lora. This is a compatible argument. Default is False.
     """
     tuner_backend: Literal['peft', 'unsloth'] = 'peft'
     train_type: str = field(default='lora', metadata={'help': f'train_type choices: {list(get_supported_tuners())}'})
@@ -83,8 +106,8 @@ class BaseArguments(CompatArguments, GenerationArguments, QuantizeArguments, Dat
     # dataset
     packing: bool = False
     packing_length: Optional[int] = None
+    packing_num_proc: int = 1
     lazy_tokenize: Optional[bool] = None
-    cached_dataset: List[str] = field(default_factory=list)
     custom_register_path: List[str] = field(default_factory=list)  # .py
     # hub
     use_hf: bool = False
@@ -104,8 +127,10 @@ class BaseArguments(CompatArguments, GenerationArguments, QuantizeArguments, Dat
 
     def _init_lazy_tokenize(self):
         if self.lazy_tokenize is None:
-            if (self.model_meta is not None and self.model_meta.is_multimodal and not self.streaming
-                    and not self.packing):
+            if self.cached_dataset or self.cached_val_dataset:
+                self.lazy_tokenize = False
+            elif (self.model_meta is not None and self.model_meta.is_multimodal and not self.streaming
+                  and not self.packing):
                 self.lazy_tokenize = True
             else:
                 self.lazy_tokenize = False
@@ -160,7 +185,6 @@ class BaseArguments(CompatArguments, GenerationArguments, QuantizeArguments, Dat
         self._init_custom_register()
         self._import_external_plugins()
         self._init_model_kwargs()
-        self._init_stream()
         # The Seq2SeqTrainingArguments has a property called world_size, which cannot be assigned a value.
         self.rank, self.local_rank, self.global_world_size, self.local_world_size = get_dist_setting()
         logger.info(f'rank: {self.rank}, local_rank: {self.local_rank}, '
@@ -173,12 +197,12 @@ class BaseArguments(CompatArguments, GenerationArguments, QuantizeArguments, Dat
         QuantizeArguments.__post_init__(self)
         TemplateArguments.__post_init__(self)
         DataArguments.__post_init__(self)
+        RayArguments.__post_init__(self)
+        self._init_stream()
         if self.max_length is None and self.model_info is not None:
             self.max_length = self.model_info.max_model_len
         if self.packing and self.packing_length is None:
             self.packing_length = self.max_length
-        if isinstance(self.cached_dataset, str):
-            self.cached_dataset = [self.cached_dataset]
         self._init_lazy_tokenize()
         self.hub = get_hub(self.use_hf)
         if self.hub.try_login(self.hub_token):
@@ -218,7 +242,10 @@ class BaseArguments(CompatArguments, GenerationArguments, QuantizeArguments, Dat
     def _init_ckpt_dir(self, adapters=None):
         # compat megatron
         model = self.model or getattr(self, 'mcore_model', None) or getattr(self, 'load', None)
-        adapters = adapters or self.adapters or getattr(self, 'mcore_adapters', None)
+        adapters = adapters or self.adapters or getattr(self, 'mcore_adapters', None) or getattr(
+            self, 'adapter_load', None)
+        if isinstance(adapters, str):
+            adapters = [adapters]
         self.ckpt_dir = get_ckpt_dir(model, adapters)
         if self.ckpt_dir and self.load_args:
             self.load_args_from_ckpt()
@@ -306,12 +333,13 @@ class BaseArguments(CompatArguments, GenerationArguments, QuantizeArguments, Dat
                             **kwargs):
         if self.tuner_backend == 'unsloth':
             return load_by_unsloth(self)
-        kwargs.update(self.get_model_kwargs())
+        res = self.get_model_kwargs()
+        res.update(kwargs)
         # compat rlhf
-        kwargs['model_id_or_path'] = model or self.model
-        kwargs['model_type'] = model_type or self.model_type
-        kwargs['model_revision'] = model_revision or self.model_revision
-        kwargs['task_type'] = task_type or self.task_type
-        kwargs['num_labels'] = num_labels or self.num_labels
+        res['model_id_or_path'] = model or self.model
+        res['model_type'] = model_type or self.model_type
+        res['model_revision'] = model_revision or self.model_revision
+        res['task_type'] = task_type or self.task_type
+        res['num_labels'] = num_labels or self.num_labels
 
-        return get_model_tokenizer(**kwargs)
+        return get_model_tokenizer(**res)

@@ -14,6 +14,7 @@ from .utils import AdapterRequest
 try:
     os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
     os.environ['VLLM_ENGINE_ITERATION_TIMEOUT_S'] = '86400'
+    from vllm.lora.request import LoRARequest
 except Exception:
     raise
 
@@ -44,6 +45,9 @@ class GRPOVllmEngine(VllmEngine):
         task_type: Optional[str] = None,
         disable_cascade_attn: bool = False,
         load_format: str = 'auto',
+        mm_processor_cache_gb: Optional[float] = None,
+        logprobs_mode: Optional[str] = None,
+        speculative_config: Optional[Union[str, dict]] = None,
         # lora
         enable_lora: bool = False,
         max_loras: int = 1,
@@ -77,6 +81,9 @@ class GRPOVllmEngine(VllmEngine):
             task_type=task_type,
             disable_cascade_attn=disable_cascade_attn,
             load_format=load_format,
+            mm_processor_cache_gb=mm_processor_cache_gb,
+            logprobs_mode=logprobs_mode,
+            speculative_config=speculative_config,
             enable_lora=enable_lora,
             max_loras=max_loras,
             max_lora_rank=max_lora_rank,
@@ -98,6 +105,16 @@ class GRPOVllmEngine(VllmEngine):
         use_tqdm: Optional[bool] = None,
         adapter_request: Optional[AdapterRequest] = None,
     ) -> List[RolloutOutput]:
+        if not adapter_request and self.enable_lora:
+            lora_int_ids = list(self.engine.list_loras())
+            if lora_int_ids:
+                # since max_lora = 1, pick the first lora
+                adapter_request = LoRARequest(
+                    lora_name=f'{lora_int_ids[0]}',
+                    lora_int_id=lora_int_ids[0],
+                    lora_path='dummy_lora_path',
+                )
+
         res = super().infer(
             infer_requests,
             request_config,
@@ -122,7 +139,7 @@ class GRPOVllmEngine(VllmEngine):
                           metrics: Optional[List[Metric]] = None,
                           *,
                           use_tqdm: Optional[bool] = None,
-                          **kwargs) -> List[ChatCompletionResponse]:
+                          **kwargs) -> List[RolloutOutput]:
         if request_config is None:
             request_config = RequestConfig()
         assert request_config.n == 1
@@ -130,7 +147,15 @@ class GRPOVllmEngine(VllmEngine):
         tasks = [self.infer_async(infer_request, request_config, **kwargs) for infer_request in infer_requests]
         if use_tqdm is None:
             use_tqdm = len(infer_requests) > 1
-        return self._batch_infer_stream(tasks, request_config.stream, use_tqdm, metrics)
+        res = await self._batch_infer_stream(tasks, request_config.stream, use_tqdm, metrics)
+
+        for i, result in enumerate(res):
+            if not isinstance(result, RolloutOutput):
+                if not isinstance(result, ChatCompletionResponse):
+                    raise TypeError('Result must be a ChatCompletionResponse or RolloutOutput instance.')
+                res[i] = RolloutOutput(response=result)
+
+        return res
 
     async def _batch_infer_stream(self,
                                   tasks,
@@ -166,7 +191,7 @@ class GRPOVllmEngine(VllmEngine):
             logprobs = self._get_logprobs(output.logprobs, output.token_ids, request_config.top_logprobs)
             toolcall = self._get_toolcall(response, template)
 
-            token_ids = template.skip_stop_tokens(output.token_ids) if request_config.return_details else None
+            token_ids = output.token_ids if request_config.return_details else None
             choice = ChatCompletionResponseChoice(
                 index=output.index,
                 message=ChatMessage(role='assistant', content=response, tool_calls=toolcall),
@@ -189,3 +214,13 @@ class GRPOVllmEngine(VllmEngine):
             id=request_id,
             prompt_token_ids=prompt_token_ids,
             images_size=images_size)
+
+    def _add_adapter(self, adapter_request: Optional[Union[AdapterRequest, LoRARequest]] = None):
+        assert self.enable_lora, f'adapter_request: {adapter_request}, self.enable_lora: {self.enable_lora}'
+        from vllm.lora.request import LoRARequest
+        if isinstance(adapter_request, AdapterRequest):
+            return super()._add_adapter(adapter_request)
+        elif isinstance(adapter_request, LoRARequest):
+            return adapter_request
+        else:
+            raise ValueError(f'Invalid adapter request: {adapter_request}')

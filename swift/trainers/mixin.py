@@ -42,7 +42,8 @@ from swift.llm import BatchSamplerShard, DataLoaderDispatcher, DataLoaderShard, 
 from swift.llm.utils import update_generation_config_eos_token
 from swift.plugin import MeanMetric, compute_acc, extra_tuners, get_loss_func, get_metric
 from swift.tuners import SwiftModel
-from swift.utils import get_current_device, get_logger, is_dist, is_mp, is_mp_ddp, ms_logger_context, seed_worker
+from swift.utils import (get_current_device, get_last_valid_indices, get_logger, is_dist, is_mp, is_mp_ddp,
+                         ms_logger_context, seed_worker)
 from ..llm.model.patcher import get_lm_head_model, revert_padding_free, transformers_seq_cls_forward
 from .arguments import TrainingArguments
 from .utils import can_return_loss, find_labels, get_function, is_instance_of_ms_model
@@ -76,11 +77,13 @@ class SwiftMixin:
 
         if args.check_model and hasattr(model, 'model_dir'):
             with ms_logger_context(logging.CRITICAL), self._patch_timeout():
-                check_local_model_is_latest(
-                    model.model_dir, user_agent={
-                        'invoked_by': 'local_trainer',
-                        'third_party': 'swift',
-                    })
+                config_info = self._collect_config_info()
+                config_info.update({
+                    'invoked_by': 'local_trainer',
+                    'third_party': 'swift',
+                    'trainer_class': self.__class__.__name__,
+                })
+                check_local_model_is_latest(model.model_dir, user_agent=config_info)
         if eval_dataset is None and args:
             if getattr(args, 'eval_dataset', None):
                 # Avoid trainer throwing errors.
@@ -149,6 +152,18 @@ class SwiftMixin:
             yield
         finally:
             HubApi.__init__ = __init__
+
+    def _collect_config_info(self) -> Dict[str, str]:
+        """
+        Collects trainer-specific configuration details.
+
+        Subclasses can override this method to provide additional configuration
+        information for model compatibility verification.
+
+        Returns:
+            Dict[str, str]: Configuration parameters as key-value pairs.
+        """
+        return {}
 
     @property
     def tokenizer(self):
@@ -267,15 +282,17 @@ class SwiftMixin:
 
             _unwrap_model = unwrap_model(self.model)
             if isinstance(_unwrap_model, supported_classes):
+                save_kwargs = {'state_dict': state_dict}
+                if isinstance(_unwrap_model, PeftModel):
+                    save_kwargs['selected_adapters'] = ['default']
                 if use_flash_ckpt:
                     _unwrap_model.save_pretrained(
                         output_dir,
-                        state_dict=state_dict,
                         safe_serialization=False,
-                        save_function=self.flash_checkpointer.ckpt_agent.save)
+                        save_function=self.flash_checkpointer.ckpt_agent.save,
+                        **save_kwargs)
                 else:
-                    _unwrap_model.save_pretrained(
-                        output_dir, state_dict=state_dict, safe_serialization=save_safetensors)
+                    _unwrap_model.save_pretrained(output_dir, safe_serialization=save_safetensors, **save_kwargs)
             else:
                 logger.info('Trainer.model is not a `PreTrainedModel`, only saving its state dict.')
                 if use_flash_ckpt:
@@ -319,14 +336,17 @@ class SwiftMixin:
                 self.model, output_dir, state_dict=state_dict, safe_serialization=save_safetensors)
         else:
             if self.model.__class__.__name__ != 'SentenceTransformer':
+                save_kwargs = {'state_dict': state_dict}
+                if isinstance(self.model, PeftModel):
+                    save_kwargs['selected_adapters'] = ['default']
                 if use_flash_ckpt:
                     self.model.save_pretrained(
                         output_dir,
-                        state_dict=state_dict,
                         safe_serialization=False,
-                        save_function=self.flash_checkpointer.ckpt_agent.save)
+                        save_function=self.flash_checkpointer.ckpt_agent.save,
+                        **save_kwargs)
                 else:
-                    self.model.save_pretrained(output_dir, state_dict=state_dict, safe_serialization=save_safetensors)
+                    self.model.save_pretrained(output_dir, safe_serialization=save_safetensors, **save_kwargs)
             else:
 
                 @contextmanager
@@ -680,7 +700,8 @@ class SwiftMixin:
                         output = llm_model.forward(*args, **kwargs)
                         return revert_padding_free(output, kwargs, self.args.padding_side)
 
-                    return transformers_seq_cls_forward(model, *args, origin_forward=inner_forward, **kwargs)
+                    return transformers_seq_cls_forward(
+                        model, *args, origin_forward=inner_forward, padding_side=self.args.padding_side, **kwargs)
 
                 model.forward = MethodType(seq_cls_forward, model)
             elif self.args.task_type == 'reranker':
@@ -693,7 +714,13 @@ class SwiftMixin:
                         output = llm_model.forward(*args, **kwargs)
                         return revert_padding_free(output, kwargs, self.args.padding_side)
 
-                    return transformers_seq_cls_forward(model, *args, origin_forward=inner_forward, **kwargs)
+                    padding_free_fn = getattr(model, 'padding_free_fn', None)
+                    if callable(padding_free_fn):
+                        output = inner_forward(*args, **kwargs)
+                        return padding_free_fn(output, kwargs, self.args.padding_side)
+
+                    return transformers_seq_cls_forward(
+                        model, *args, origin_forward=inner_forward, padding_side=self.args.padding_side, **kwargs)
 
                 model.forward = MethodType(reranker_forward, model)
             elif self.args.task_type == 'generative_reranker':
@@ -761,8 +788,8 @@ class SwiftMixin:
                         else:
                             vision_tower.gradient_checkpointing_disable()
                             vision_tower.disable_input_require_grads()
-                    except (NotImplementedError, AttributeError):
-                        pass
+                    except (NotImplementedError, AttributeError) as e:
+                        logger.warning(f'prepare gradient_checkpointing failed: {e}')
         # Avoid vit_gradient_checkpointing being overwritten by transformers.Trainer.gradient_checkpointing_enable.
         self.args.gradient_checkpointing = False
 
@@ -886,7 +913,7 @@ class SwiftMixin:
         else:
             super().create_optimizer_and_scheduler(num_training_steps=num_training_steps)
 
-    def _compute_acc(self, outputs, labels) -> None:
+    def _compute_acc(self, outputs, labels, cu_seqlens=None, attention_mask=None) -> None:
         args = self.args
         logits = outputs.logits
         metrics = None
@@ -911,14 +938,27 @@ class SwiftMixin:
 
             if isinstance(positive_token_id, int) and isinstance(negative_token_id, int) \
                     and positive_token_id >= 0 and negative_token_id >= 0:
-                positive_logits = logits[:, -1, positive_token_id]
-                negative_logits = logits[:, -1, negative_token_id]
+                # Handle right padding by finding the last valid token position
+                if attention_mask is not None:
+                    # Extract logits at the last valid (non-padding) token position for each sample
+                    batch_size = logits.shape[0]
+                    last_valid_indices = get_last_valid_indices(attention_mask)
+                    batch_indices = torch.arange(batch_size, device=logits.device)
+                    last_valid_logits = logits[batch_indices, last_valid_indices, :]
+                    positive_logits = last_valid_logits[:, positive_token_id]
+                    negative_logits = last_valid_logits[:, negative_token_id]
+                else:
+                    # Fallback to original behavior if attention_mask is not available
+                    positive_logits = logits[:, -1, positive_token_id]
+                    negative_logits = logits[:, -1, negative_token_id]
+
                 binary_preds = (positive_logits > negative_logits).long()
                 metrics = compute_acc(
                     binary_preds,
                     labels.long(),
                     acc_strategy=args.acc_strategy,
-                    is_encoder_decoder=self.template.is_encoder_decoder)
+                    is_encoder_decoder=self.template.is_encoder_decoder,
+                    cu_seqlens=cu_seqlens)
         elif logits.dim() == 1 or (logits.dim() == 2 and logits.size(-1) == 1):
             if logits.dim() == 2:
                 logits = logits.squeeze(-1)
@@ -927,7 +967,12 @@ class SwiftMixin:
                 binary_preds,
                 labels.long(),
                 acc_strategy=args.acc_strategy,
-                is_encoder_decoder=self.template.is_encoder_decoder)
+                is_encoder_decoder=self.template.is_encoder_decoder,
+                cu_seqlens=cu_seqlens)
+        elif self.args.task_type == 'seq_cls' and self.args.problem_type == 'multi_label_classification':
+            # TODO: compat padding_free
+            preds = logits.sigmoid() > 0.5
+            metrics = {'acc': (labels == preds).all(dim=-1)}
         else:
             preds = logits.argmax(dim=-1)
             if self.template.sequence_parallel_size > 1:
@@ -952,7 +997,11 @@ class SwiftMixin:
                 labels = labels_output.int()
 
             metrics = compute_acc(
-                preds, labels, acc_strategy=args.acc_strategy, is_encoder_decoder=self.template.is_encoder_decoder)
+                preds,
+                labels,
+                acc_strategy=args.acc_strategy,
+                is_encoder_decoder=self.template.is_encoder_decoder,
+                cu_seqlens=cu_seqlens)
 
         if metrics:
             mode = 'train' if self.model.training else 'eval'
@@ -965,12 +1014,15 @@ class SwiftMixin:
         from evalscope import TaskConfig, run_task
 
         self.model.eval()
+        template = copy(self.template)
+        template.packing = False
+        template.padding_free = False
         # prepare task config
         task_config_kwargs = dict(
             model=EvalModel(
                 model_name=f'model-step{self.state.global_step}',
                 model=self.model,
-                template=self.template,
+                template=template,
                 max_batch_size=self.args.per_device_eval_batch_size,
             ),
             eval_type='swift_custom',

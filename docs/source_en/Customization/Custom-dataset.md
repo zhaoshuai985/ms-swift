@@ -30,7 +30,7 @@ Query-Response format:
 ```jsonl
 {"system": "<system>", "query": "<query2>", "response": "<response2>", "history": [["<query1>", "<response1>"]]}
 ```
-Note: The following fields will be automatically converted to the corresponding system, query, and response fields.
+Note: The following fields will be automatically converted to the corresponding system, query, and response fields. (The 'solution' field will be retained)
 - system: 'system', 'system_prompt'.
 - query: 'query', 'prompt', 'input', 'instruction', 'question', 'problem'.
 - response: 'response', 'answer', 'output', 'targets', 'target', 'answer_key', 'answers', 'solution', 'text', 'completion', 'content'.
@@ -216,8 +216,9 @@ For grounding (object detection) tasks, ms-swift supports two methods:
 When using this type of data, please note:
 
 - Different models have different special characters and data format for the grounding task.
-- The handling of bounding box normalization varies across different models: for example, qwen2.5-vl uses absolute coordinates, while qwen2-vl and internvl2.5 require bounding box coordinates to be normalized to the thousandth scale.
+- The handling of bounding box normalization varies across different models: for example, qwen2.5-vl uses absolute coordinates, while qwen2/3-vl and internvl2.5 require bounding box coordinates to be normalized to the thousandth scale.
   - Note: Qwen2.5-VL uses absolute coordinates, so you need to be careful with image resizing each time. If you use the dataset format from Option 1, you need to resize the images in advance (height and width must be multiples of 28) and scale the coordinates accordingly. If you use the dataset format from Option 2, ms-swift will handle image resizing for you. You can still use `MAX_PIXELS` or `--max_pixels` for image resizing (training only; for inference, you still need to handle image resizing yourself).
+
 
 2. Use ms-swift's grounding data format:
 
@@ -229,11 +230,16 @@ When using this type of data, please note:
 
 The format will automatically convert the dataset format to the corresponding model's grounding task format and select the appropriate model's bbox normalization method. Compared to the general format, this format includes an additional "objects" field, which contains the following subfields:
 
-- ref: Used to replace `<ref-object>`.
-- bbox: Used to replace `<bbox>`. If the length of each box in the bbox is 2, it represents the x and y coordinates. If the box length is 4, it represents the x and y coordinates of two points.
+- ref: Used to replace the `<ref-object>` placeholder in messages. The length of `ref` should match the number of `<ref-object>` instances.
+- bbox: Used to replace the `<bbox>` placeholder in messages. If the length of each box in the bbox is 2, it represents the x and y coordinates. If the box length is 4, it represents the x and y coordinates of two points. The length of `bbox` should match the number of `<bbox>` instances.
   - Note: `<ref-object>` and `<bbox>` do not have a corresponding relationship; references and bounding boxes replace their own placeholders separately.
 - bbox_type: Optional values are 'real' and 'norm1'. The default is 'real', meaning the bbox represents the actual bounding box value. If set to 'norm1', the bbox is normalized to the range 0~1.
-- image_id: This parameter is only effective when bbox_type is 'real'. It indicates the index of the image corresponding to the bbox, used for scaling the bbox. The index starts from 0, and the default is 0 for all.
+- image_id: Typically used for multi-image grounding tasks. This parameter only takes effect when bbox_type is 'real', representing which image the bbox corresponds to, used for scaling the bbox. The index starts from 0, and defaults to all being the 0th image. The length of image_id needs to be consistent with the length of bbox. For example: if the length of bbox is 10 and the length of images is 2, then the length of image_id needs to be 10, with values within the set `{0, 1}`.
+
+For Qwen2.5-VL/Qwen3-VL, you can set the environment variable `QWENVL_BBOX_FORMAT='new'` (default is `'legacy'`, requires "ms-swift>=3.9.1") to be compatible with the [official cookbook](https://github.com/QwenLM/Qwen3-VL/blob/main/cookbooks/2d_grounding.ipynb) format. Define your dataset in the following format:
+```jsonl
+{"messages": [{"role": "user", "content": "<image>Locate the <ref-object> in the image"}, {"role": "assistant", "content": "[\n\t{\"bbox_2d\": <bbox>, \"label\": \"<ref-object>\"},\n\t{\"bbox_2d\": <bbox>, \"label\": \"<ref-object>\"}\n]"}], "images": ["cat.png"], "objects": {"ref": ["sheep", "sheep", "sheep"], "bbox": [[90.9, 160.8, 135, 212.8], [360.9, 480.8, 495, 532.8]]}}
+```
 
 Testing the final format of the grounding data in ms-swift format:
 ```python
@@ -251,11 +257,6 @@ print(f'[LABELS] {template.safe_decode(encoded["labels"])}')
 print(f'images: {encoded["template_inputs"].images}')
 ```
 
-### Text-to-Image Format
-
-```jsonl
-{"messages": [{"role": "system", "content": "You are a useful and harmless assistant"}, {"role": "user", "content": "Draw me an apple"}, {"role": "assistant", "content": "<image>"}], "images": ["/xxx/x.jpg"]}
-```
 
 ### Agent Format
 Here are example data samples for a text-only Agent and a multimodal Agent:
@@ -272,6 +273,11 @@ Here are example data samples for a text-only Agent and a multimodal Agent:
 - Note: You can also manually process the data into the messages format with roles set to system, user, or assistant. The purpose of agent_template is to automatically map the tools field and the messages with roles tool_call and tool_response into the standard messages format with roles system, user, and assistant.
 - For more details, please refer to [Agent Documentation](../Instruction/Agent-support.md).
 
+### Text-to-Image Format
+
+```jsonl
+{"messages": [{"role": "system", "content": "You are a useful and harmless assistant"}, {"role": "user", "content": "Draw me an apple"}, {"role": "assistant", "content": "<image>"}], "images": ["/xxx/x.jpg"]}
+```
 
 ## dataset_info.json
 
@@ -338,3 +344,41 @@ The following parameters are supported:
 - split: Defaults to `['train']`.
 - preprocess_func: A preprocessing function or callable object, default is `AutoPreprocessor()`. This preprocessing function takes an `HfDataset` as input and returns an `HfDataset` in the standard format.
 - load_function: Defaults to `DatasetLoader.load`. If a custom loading function is needed, it should return an `HfDataset` in the standard format, allowing users maximum flexibility while bypassing the ms-swift dataset loading mechanism. This parameter usually does not need to be modified.
+
+
+Below are examples of registering datasets:
+
+```python
+from swift.llm import ResponsePreprocessor, DatasetMeta, register_dataset, SubsetDataset, load_dataset
+from typing import Dict, Any
+
+class CustomPreprocessor(ResponsePreprocessor):
+    def preprocess(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        query = f"""Task: Judge whether the two sentences below are semantically similar.
+Sentence 1: {row['text1']}
+Sentence 2: {row['text2']}
+Output the category [0/1]: 0 for different meanings, 1 for similar meanings.
+"""
+        response = str(row['label'])
+        row = {
+            'query': query,
+            'response': response
+        }
+        return super().preprocess(row)
+
+
+register_dataset(
+    DatasetMeta(
+        ms_dataset_id='swift/financial_classification',
+        subsets=[SubsetDataset('train', split=['train']), SubsetDataset('test', split=['test'])],
+        preprocess_func=CustomPreprocessor(),
+    ))
+
+if __name__ == '__main__':
+    # load_dataset returns train_dataset and val_dataset based on `split_dataset_ratio`
+    # Here, since we didn't pass `split_dataset_ratio` (defaults to 0), we take the first one (index 0)
+    dataset = load_dataset('swift/financial_classification:train')[0]
+    test_dataset = load_dataset('swift/financial_classification:test')[0]
+    print(f'dataset[0]: {dataset[0]}')
+    print(f'test_dataset[0]: {test_dataset[0]}')
+```

@@ -239,36 +239,42 @@ class MathAccuracy(ORM):
         import importlib.util
         assert importlib.util.find_spec('math_verify') is not None, (
             'The math_verify package is required but not installed. '
-            "Please install it using 'pip install math_verify==0.5.2'.")
+            "Please install it using 'pip install math_verify'.")
 
     def __call__(self, completions, solution, **kwargs) -> List[float]:
         from latex2sympy2_extended import NormalizationConfig
         from math_verify import LatexExtractionConfig, parse, verify
         rewards = []
         for content, sol in zip(completions, solution):
-            gold_parsed = parse(sol, extraction_mode='first_match')
+            content_match = re.search(r'<answer>(.*?)</answer>', content, re.DOTALL)
+            content_to_parse = content_match.group(1).strip() if content_match else content
+            has_answer_tag = content_match is not None
+
+            sol_match = re.search(r'<answer>(.*?)</answer>', sol, re.DOTALL)
+            sol_to_parse = sol_match.group(1).strip() if sol_match else sol
+
+            gold_parsed = parse(sol_to_parse, extraction_mode='first_match')
             if len(gold_parsed) != 0:
-                # We require the answer to be provided in correct latex (no malformed operators)
-                answer_parsed = parse(
-                    content,
-                    extraction_config=[
-                        LatexExtractionConfig(
-                            normalization_config=NormalizationConfig(
-                                nits=False,
-                                malformed_operators=False,
-                                basic_latex=True,
-                                equations=True,
-                                boxed=True,
-                                units=True,
-                            ),
-                            # Ensures that boxed is tried first
-                            boxed_match_priority=0,
-                            try_extract_without_anchor=False,
-                        )
-                    ],
-                    extraction_mode='first_match',
-                )
-                # edge case
+                if has_answer_tag:
+                    answer_parsed = parse(content_to_parse, extraction_mode='first_match')
+                else:
+                    answer_parsed = parse(
+                        content_to_parse,
+                        extraction_config=[
+                            LatexExtractionConfig(
+                                normalization_config=NormalizationConfig(
+                                    nits=False,
+                                    malformed_operators=False,
+                                    basic_latex=True,
+                                    boxed=True,
+                                    units=True,
+                                ),
+                                boxed_match_priority=0,
+                                try_extract_without_anchor=False,
+                            )
+                        ],
+                        extraction_mode='first_match',
+                    )
                 try:
                     reward = float(verify(gold_parsed, answer_parsed))
                 except Exception:

@@ -10,6 +10,8 @@ import numpy as np
 import requests
 import torch
 from PIL import Image
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from swift.utils import get_env_args
 
@@ -100,32 +102,61 @@ def rescale_image(img: Image.Image, max_pixels: int) -> Image.Image:
 _T = TypeVar('_T')
 
 
+def _check_path(path: str) -> Union[str, None]:
+    """If it is a path, return the string; if it is base64, return None."""
+    MAX_PATH_HEURISTIC = 2000
+    if len(path) > MAX_PATH_HEURISTIC:
+        return
+    if os.path.exists(path):
+        return os.path.abspath(path)
+    data = path
+    ROOT_IMAGE_DIR = get_env_args('ROOT_IMAGE_DIR', str, None)
+    if ROOT_IMAGE_DIR is not None:
+        path = os.path.join(ROOT_IMAGE_DIR, path)
+    path = os.path.abspath(os.path.expanduser(path))
+    if os.path.exists(path):
+        return path
+    if data.startswith('data:'):
+        return
+    try:
+        base64.b64decode(data)
+        return
+    except Exception:
+        pass
+    return data
+
+
 def load_file(path: Union[str, bytes, _T]) -> Union[BytesIO, _T]:
     res = path
     if isinstance(path, str):
         path = path.strip()
         if path.startswith('http'):
-            request_kwargs = {}
-            timeout = float(os.getenv('TIMEOUT', '300'))
-            if timeout > 0:
-                request_kwargs['timeout'] = timeout
-            content = requests.get(path, **request_kwargs).content
-            res = BytesIO(content)
-        elif os.path.exists(path) or (not path.startswith('data:') and len(path) <= 200):
-            ROOT_IMAGE_DIR = get_env_args('ROOT_IMAGE_DIR', str, None)
-            if ROOT_IMAGE_DIR is not None and not os.path.exists(path):
-                path = os.path.join(ROOT_IMAGE_DIR, path)
-            path = os.path.abspath(os.path.expanduser(path))
-            with open(path, 'rb') as f:
-                res = BytesIO(f.read())
-        else:  # base64_str
+            retries = Retry(total=3, backoff_factor=1, allowed_methods=['GET'])
+            with requests.Session() as session:
+                session.mount('http://', HTTPAdapter(max_retries=retries))
+                session.mount('https://', HTTPAdapter(max_retries=retries))
+
+                timeout = float(os.getenv('SWIFT_TIMEOUT', '20'))
+                request_kwargs = {'timeout': timeout} if timeout > 0 else {}
+
+                response = session.get(path, **request_kwargs)
+                response.raise_for_status()
+                content = response.content
+                res = BytesIO(content)
+        else:
             data = path
-            if data.startswith('data:'):
-                match_ = re.match(r'data:(.+?);base64,(.+)', data)
-                assert match_ is not None
-                data = match_.group(2)
-            data = base64.b64decode(data)
-            res = BytesIO(data)
+            path = _check_path(path)
+            if path is None:
+                # base64_str
+                if data.startswith('data:'):
+                    match_ = re.match(r'data:(.+?);base64,(.+)', data)
+                    assert match_ is not None
+                    data = match_.group(2)
+                data = base64.b64decode(data)
+                res = BytesIO(data)
+            else:
+                with open(path, 'rb') as f:
+                    res = BytesIO(f.read())
     elif isinstance(path, bytes):
         res = BytesIO(path)
     return res

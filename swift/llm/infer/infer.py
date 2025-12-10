@@ -8,9 +8,10 @@ from tqdm import tqdm
 from swift.llm import InferArguments, InferRequest, SwiftPipeline, load_dataset, prepare_model_template, sample_dataset
 from swift.plugin import InferStats, MeanMetric, compute_rouge_bleu
 from swift.utils import JsonlWriter, get_dist_setting, get_logger, is_dist, is_master, read_from_jsonl
+from ..dataset.loader import DatasetLoader
 from .infer_engine import AdapterRequest, PtEngine
 from .protocol import RequestConfig
-from .utils import InferCliState
+from .utils import InferCliState, get_cached_dataset
 
 logger = get_logger()
 
@@ -178,77 +179,25 @@ class SwiftInfer(SwiftPipeline):
     def _prepare_val_dataset(self) -> HfDataset:
         args = self.args
         dataset_kwargs = args.get_dataset_kwargs()
+        if args.cached_dataset or args.cached_val_dataset:
+            _, val_datasets = get_cached_dataset(self.args)
+        else:
+            val_datasets = []
         if len(args.val_dataset) > 0:
             _, val_dataset = load_dataset(
                 args.val_dataset, split_dataset_ratio=1.0, shuffle=args.val_dataset_shuffle, **dataset_kwargs)
-        else:
+            val_datasets.append(val_dataset)
+        elif args.dataset:
             _, val_dataset = load_dataset(
                 args.dataset,
                 split_dataset_ratio=args.split_dataset_ratio,
                 shuffle=args.dataset_shuffle,
                 **dataset_kwargs)
-        assert val_dataset is not None
+            val_datasets.append(val_dataset)
+        assert len(val_datasets) > 0
+        val_dataset = DatasetLoader._concat_datasets(val_datasets)
         val_dataset = sample_dataset(val_dataset, args.val_dataset_sample, args.dataset_shuffle, self.random_state)
         return val_dataset
-
-    @staticmethod
-    def _extract_original_images(data: Dict[str, Any]) -> Optional[List[str]]:
-        """提取原始images格式（字符串列表），如果已经是字典格式则转回字符串列表"""
-        images = data.get('images')
-        if images is None:
-            return None
-        
-        # 如果是字典格式 [{"bytes": null, "path": "xxx"}]，转换为字符串列表
-        if isinstance(images, list) and images and isinstance(images[0], dict):
-            return [img.get('path') or img for img in images]
-        # 如果已经是字符串列表，直接返回
-        elif isinstance(images, list):
-            return images
-        # 如果是单个字符串
-        elif isinstance(images, str):
-            return [images]
-        return None
-
-    @staticmethod
-    def _build_output_data(original_data: Dict[str, Any], 
-                          original_images: Optional[List[str]], 
-                          response: str, 
-                          labels: Optional[str]) -> Dict[str, Any]:
-        """构建输出数据，按指定顺序：qid、images、messages、answer、answer_type、meta"""
-        # 构建新的messages（包含assistant的回复）
-        messages = original_data.get('messages', []).copy()
-        # 移除原有的assistant回复（如果有）
-        if messages and messages[-1].get('role') == 'assistant':
-            messages = messages[:-1]
-        messages.append({'role': 'assistant', 'content': response})
-        
-        # 定义核心字段
-        core_fields = {'qid', 'images', 'messages', 'answer', 'answer_type', 'response', 'labels'}
-        
-        # 提取answer（优先使用原数据中的answer，如果没有则使用labels）
-        answer = original_data.get('answer', labels)
-        
-        # 构建meta字段（包含所有非核心字段）
-        meta = {}
-        for k, v in original_data.items():
-            if k not in core_fields:
-                meta[k] = v
-        
-        # 按指定顺序构建输出
-        output = {}
-        if 'qid' in original_data:
-            output['qid'] = original_data['qid']
-        if original_images is not None:
-            output['images'] = original_images
-        output['messages'] = messages
-        if answer is not None:
-            output['answer'] = answer
-        if 'answer_type' in original_data:
-            output['answer_type'] = original_data['answer_type']
-        if meta:
-            output['meta'] = meta
-        
-        return output
 
     def _calc_metric(self):
         args = self.args
@@ -280,11 +229,6 @@ class SwiftInfer(SwiftPipeline):
         if request_config and request_config.stream:
             result_list = []
             for data in val_dataset:
-                # 保存原始数据副本
-                original_data = {k: v for k, v in data.items()}
-                # 保存原始images格式（字符串列表）
-                original_images = self._extract_original_images(original_data)
-                
                 labels = InferRequest.remove_response(data['messages'])
                 query = data['messages'][-1]['content']
                 print(f'[QUERY] {query}')
@@ -292,12 +236,11 @@ class SwiftInfer(SwiftPipeline):
                     print(f'[LABELS] {labels}')
                 print('[RESPONSE] ', end='')
                 response = self.infer_single(data, request_config)
-                
-                # 构建输出数据
-                output_data = self._build_output_data(original_data, original_images, response, labels)
-                result_list.append(output_data)
+                data['messages'].append({'role': 'assistant', 'content': response})
+                data = {'response': response, 'labels': labels, **data}
+                result_list.append(data)
                 if self.jsonl_writer:
-                    self.jsonl_writer.append(output_data)
+                    self.jsonl_writer.append(data)
             metrics = self.infer_kwargs.pop('metrics')
             print(metrics[0].compute())
         else:
@@ -312,7 +255,10 @@ class SwiftInfer(SwiftPipeline):
             while idx < len(val_dataset):
                 shard_size = min(args.write_batch_size, len(val_dataset) - idx)
                 shard_dataset = val_dataset.select(range(idx, idx + shard_size))
-                result_list += self._batch_infer(shard_dataset, request_config)
+                result = self._batch_infer(shard_dataset, request_config)
+                if self.jsonl_writer:
+                    self.jsonl_writer.append(result, gather_obj=True)
+                result_list += result
                 idx += shard_size
                 prog_bar.update(shard_size)
             prog_bar.close()
@@ -332,19 +278,14 @@ class SwiftInfer(SwiftPipeline):
             data_parallel_size = args.global_world_size // args.vllm_tensor_parallel_size
         else:
             rank, data_parallel_size = args.rank, args.global_world_size
+        # The dataset is insufficient for DP partitioning
+        if len(val_dataset) < data_parallel_size:
+            if rank >= len(val_dataset):
+                return []
+            data_parallel_size = len(val_dataset)
         if rank >= 0 and data_parallel_size > 1:
             val_dataset = val_dataset.shard(data_parallel_size, rank, contiguous=True)
         val_dataset = list(val_dataset)
-        
-        # 保存每条数据的原始副本和原始images
-        original_data_list = []
-        original_images_list = []
-        for data in val_dataset:
-            original_data = {k: v for k, v in data.items()}
-            original_images = self._extract_original_images(original_data)
-            original_data_list.append(original_data)
-            original_images_list.append(original_images)
-        
         labels_list = []
         for data in val_dataset:
             if args.task_type == 'causal_lm':
@@ -354,14 +295,13 @@ class SwiftInfer(SwiftPipeline):
             labels_list.append(labels)
 
         resp_list = self.infer(val_dataset, request_config, template=self.template, use_tqdm=True, **self.infer_kwargs)
-        if not (args.infer_backend == 'vllm' and rank >= 0 and args.rank % args.vllm_tensor_parallel_size != 0):
-            for original_data, original_images, resp, labels in zip(original_data_list, original_images_list, resp_list, labels_list):
+        if not (args.infer_backend == 'vllm' and rank >= 0
+                and args.rank % args.vllm_tensor_parallel_size != 0):  # DP & TP
+            for data, resp, labels in zip(val_dataset, resp_list, labels_list):
                 response = resp.choices[0].message.content
-                # 构建输出数据
-                output_data = self._build_output_data(original_data, original_images, response, labels)
-                result_list.append(output_data)
-        if self.jsonl_writer:
-            self.jsonl_writer.append(result_list, gather_obj=True)
+                data['messages'].append({'role': 'assistant', 'content': response})
+                data = {'response': response, 'labels': labels, 'logprobs': resp.choices[0].logprobs, **data}
+                result_list.append(data)
         return result_list
 
 

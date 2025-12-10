@@ -62,6 +62,32 @@ class Qwen3Template(ThinkingTemplate):
 
 register_template(QwenTemplateMeta(LLMTemplateType.qwen3, default_system=None, template_cls=Qwen3Template))
 
+QWEN3_GUARD_TEMPLATE = (
+    '<|im_start|>user\n'
+    "# Task:\n1) Evaluate whether THE LAST USER's query belongs to safe or unsafe content based on our "
+    'safety policy.\n2) Identify the category of unsafe content found.\n\n<BEGIN SAFETY POLICY>\n'
+    "**Safety: Safe**: The USER's query does not contain any prohibited content or content that could "
+    "lead to prohibited content.\n**Safety: Unsafe**: The USER's query contains prohibited content.\n"
+    "**Safety: Controversial**: The USER's query does not explicitly contain prohibited content, but "
+    'its intent, context, or potential responses could be misinterpreted, misused, or exploited to '
+    'generate unsafe content under certain conditions.\n<END SAFETY POLICY>\n\n<BEGIN UNSAFE CONTENT '
+    'CATEGORIES>\nViolent.\nNon-violent Illegal Acts.\nSexual Content or Sexual Acts.\nPII.\nSuicide '
+    '& Self-Harm.\nUnethical Acts.\nPolitically Sensitive Topics.\nCopyright Violation.\nJailbreak.\n'
+    '<END UNSAFE CONTENT CATEGORIES>\n\n<BEGIN CONVERSATION>\n\nUSER: {{QUERY}}\n\n<END CONVERSATION>'
+    "\n\nProvide your safety assessment for ONLY THE LAST **USER's query** in the above conversation:\n"
+    " - The first line must be one of: 'Safety: Safe', 'Safety: Unsafe', 'Safety: Controversial'.\n - "
+    "The second line should start with 'Categories:' followed by a list of any unsafe content "
+    "categories, separated by commas. If the content is safe, use 'Categories: None'."
+    '<|im_end|>\n<|im_start|>assistant\n')
+
+register_template(
+    QwenTemplateMeta(
+        LLMTemplateType.qwen3_guard,
+        default_system=None,
+        template_cls=Qwen3Template,
+        prompt=[QWEN3_GUARD_TEMPLATE],
+        response_prefix='<think>\n\n</think>\n\n'))
+
 register_template(
     QwenTemplateMeta(
         LLMTemplateType.qwen3_thinking, default_system=None, response_prefix='<think>\n',
@@ -264,6 +290,7 @@ class Qwen2VLTemplate(Template):
     def init_env_args(self):
         super().init_env_args()
         self.transformers_version = version.parse(transformers.__version__)
+        self.bbox_format = get_env_args('QWENVL_BBOX_FORMAT', str, 'legacy')
 
     def replace_tag(self, media_type: Literal['image', 'video', 'audio'], index: int,
                     inputs: StdTemplateInputs) -> List[Context]:
@@ -280,26 +307,38 @@ class Qwen2VLTemplate(Template):
             if self.version == 'v3':
                 kwargs['return_video_metadata'] = True
             video = inputs.videos[index]
-            video, video_kwargs = fetch_video({'video': video}, return_video_sample_fps=True, **kwargs)
+            video_inputs = {'video': video}
+            if isinstance(video, list):  # image list
+                from qwen_vl_utils import vision_process
+                video_inputs['sample_fps'] = vision_process.FPS
+            video, video_kwargs = fetch_video(video_inputs, return_video_sample_fps=True, **kwargs)
             if self.version == 'v2_5':
                 inputs.mm_processor_kwargs.setdefault('fps', []).append(video_kwargs)
                 tokens = ['<|vision_start|><|video_pad|><|vision_end|>']
             elif self.version == 'v3':
-                if video is not None:
+                if self.mode == 'vllm':
+                    tokens = ['<|vision_start|><|video_pad|><|vision_end|>']
+                else:
                     video, video_metadata = video
                     inputs.mm_processor_kwargs.setdefault('video_metadata', []).append(video_metadata)
+                    tokens = ['<|video_pad|>']
                 inputs.mm_processor_kwargs['do_sample_frames'] = False
-                tokens = ['<|video_pad|>']
             if isinstance(video, torch.Tensor):
                 video = video.to(torch.uint8)
             inputs.videos[index] = video
             return tokens
 
     def replace_ref(self, ref: str, index: int, inputs: StdTemplateInputs) -> List[Context]:
-        return [f'<|object_ref_start|>{ref}<|object_ref_end|>']
+        if self.bbox_format == 'legacy':
+            return [f'<|object_ref_start|>{ref}<|object_ref_end|>']
+        else:
+            return [ref]
 
     def replace_bbox(self, bbox: List[int], index: int, inputs: StdTemplateInputs) -> List[Context]:
-        return [f'<|box_start|>{self._get_bbox_str(bbox)}<|box_end|>']
+        if self.bbox_format == 'legacy':
+            return [f'<|box_start|>{self._get_bbox_str(bbox)}<|box_end|>']
+        else:
+            return [str(bbox)]
 
     def _encode(self, inputs: StdTemplateInputs) -> Dict[str, Any]:
         encoded = super()._encode(inputs)
@@ -391,7 +430,7 @@ class Qwen2VLTemplate(Template):
         kwargs = {}
         if self.version == 'v2_5':
             kwargs = {'second_per_grid_ts': inputs.get('second_per_grid_ts')}
-        base_model = self.get_base_model(self.model)
+        base_model = self.get_base_model(self._get_model())
         if hasattr(base_model, 'get_rope_index'):
             get_rope_index = base_model.get_rope_index
         else:
@@ -553,7 +592,10 @@ class Qwen2_5OmniTemplate(Qwen2_5VLTemplate):
                 if self.version == 'omni_v2_5':
                     return ['<|vision_bos|><|audio_bos|><|VIDEO|><|audio_eos|><|vision_eos|>']
                 elif self.version == 'omni_v3':
-                    return ['<|vision_start|><|audio_start|><|video_pad|><|audio_end|><|vision_end|>']
+                    if self.mode == 'vllm':
+                        return ['<|vision_start|><|video_pad|><|vision_end|>']
+                    else:
+                        return ['<|vision_start|><|audio_start|><|video_pad|><|audio_end|><|vision_end|>']
             if self.version == 'omni_v2_5':
                 return ['<|vision_bos|><|VIDEO|><|vision_eos|>']
             elif self.version == 'omni_v3':
@@ -732,10 +774,12 @@ class Qwen2_5OmniTemplate(Qwen2_5VLTemplate):
             audio_feature_lengths = None
         video_second_per_grid = inputs.pop('video_second_per_grid', None)
         input_ids = inputs['input_ids']
-        attention_mask = inputs.get('attention_mask')
+        attention_mask = inputs.get('attention_mask_2d')
+        if attention_mask is None:
+            attention_mask = inputs.get('attention_mask')
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
-        position_ids, _ = self.model.thinker.get_rope_index(
+        position_ids, _ = self._get_model().thinker.get_rope_index(
             input_ids,
             inputs.get('image_grid_thw'),
             inputs.get('video_grid_thw'),

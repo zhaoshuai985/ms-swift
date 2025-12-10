@@ -889,21 +889,43 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             inputs, total_rewards_per_func = self._dynamic_sampling(inputs, total_rewards_per_func)  # noqa
 
         # --- Golden Truth Injection ---
-        # Detect groups with 0 AnswerMatchCosine reward and inject golden answer to prevent gradient vanishing
+        # Detect groups with 0 or near-zero AnswerMatchCosine reward and inject golden answer to prevent gradient vanishing
         # Note: We skip this in dynamic_sample mode as it already handles zero-reward groups differently
-        injection_enabled = mode == 'train' and not self.args.dynamic_sample
+        enable_golden_truth = getattr(self.args, 'enable_golden_truth_injection', True)
+        injection_enabled = mode == 'train' and not self.args.dynamic_sample and enable_golden_truth
         if injection_enabled:
-            # 1. Identify zero-reward groups
+            # 1. Identify zero-reward or near-zero-reward groups
             # Check AnswerMatchCosine (first reward function, index 0) for each sample
-            # This is the main accuracy reward - if it's 0 for all 8 generations, we need to inject
+            # This is the main accuracy reward - if it's 0 or very low for all 8 generations, we need to inject
             answer_match_rewards = total_rewards_per_func[:, 0]  # Shape: [num_samples]
             # Reshape to [num_groups, num_generations]
             grouped_answer_rewards = answer_match_rewards.view(-1, self.num_generations)
-            # Find groups where ALL AnswerMatchCosine rewards are 0 (sum == 0 means all are 0)
-            zero_groups_indices = (grouped_answer_rewards.sum(dim=1) == 0).nonzero(as_tuple=True)[0]
+            
+            # Calculate statistics for each group
+            group_sums = grouped_answer_rewards.sum(dim=1)
+            group_maxs = grouped_answer_rewards.max(dim=1)[0]
+            group_means = grouped_answer_rewards.mean(dim=1)
+            
+            # Detection criteria:
+            # 1. Strict zero: sum == 0 (all rewards are exactly 0)
+            # 2. Near-zero: max < 0.15 AND mean < 0.10 (very weak signals, gradient will be negligible)
+            # Threshold 0.15 for max means even the "best" answer is far below normal (normal is usually 0.5-1.0)
+            # Threshold 0.10 for mean ensures the overall signal is very weak (covers more borderline cases)
+            # This covers cases like samples 37/57 where 2 answers have tiny scores (0.0268) but model still fails
+            # Also covers cases with multiple weak answers (mean 0.05-0.10) where overall signal is still weak
+            max_reward_threshold = 0.15
+            mean_reward_threshold = 0.10
+            
+            strict_zero_mask = (group_sums == 0)
+            near_zero_mask = (group_maxs < max_reward_threshold) & (group_means < mean_reward_threshold)
+            zero_groups_mask = strict_zero_mask | near_zero_mask
+            zero_groups_indices = zero_groups_mask.nonzero(as_tuple=True)[0]
             
             if len(zero_groups_indices) > 0:
-                logger.info(f"Golden Truth Injection: Found {len(zero_groups_indices)} zero-reward groups (AnswerMatchCosine all 0). Injecting golden answers...")
+                strict_zero_count = strict_zero_mask.sum().item()
+                near_zero_count = (near_zero_mask & ~strict_zero_mask).sum().item()
+                logger.info(f"Golden Truth Injection: Found {len(zero_groups_indices)} zero/near-zero reward groups "
+                           f"({strict_zero_count} strict zero, {near_zero_count} near-zero). Injecting golden answers...")
                 
                 for group_idx in zero_groups_indices:
                     # Calculate start index of this group in the flattened inputs list
@@ -949,8 +971,8 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                     # <title> image title </title>
                     # <caption> image caption </caption>
                     # <answer> final answer </answer>
-                    # We use caption as a proxy for reasoning to make <think> meaningful
-                    reasoning_content = f"Based on the image, {gold_caption}" if gold_caption else "Based on the image analysis, I can identify the relevant features to answer the question."
+                    # Use caption directly as reasoning content (simpler and more natural than constructing sentences)
+                    reasoning_content = gold_caption if gold_caption else "Based on the image analysis, I can identify the relevant features to answer the question."
                     
                     # Ensure all fields have default values if missing
                     gold_plane = gold_plane or "Unknown"
@@ -1019,13 +1041,12 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                     # If log_probs exist, we must reset them to a very small value to indicate "new strategy"
                     # This ensures PPO ratio (new/old) is large, creating a strong learning signal (SFT-like)
                     if 'log_probs' in target_input:
-                        # Using -100.0 as a proxy for log(0), representing extremely low probability
+                        # Use -15.0 as a conservative yet reasonable log-probability for the injected golden answer
                         if isinstance(target_input['log_probs'], torch.Tensor):
-                            target_input['log_probs'] = torch.full_like(target_input['log_probs'], -100.0)
+                            target_input['log_probs'] = torch.full_like(target_input['log_probs'], -15.0)
                         else:
-                            # If log_probs is not a tensor, create a tensor with the same shape/structure
-                            # This is a fallback for cases where log_probs might be a list or other type
-                            target_input['log_probs'] = -100.0
+                            # Fallback for non-tensor log_probs (list, etc.)
+                            target_input['log_probs'] = -15.0
                     
                     # Also mark this sample so we can track it in logs if needed
                     target_input['is_golden_injected'] = True
@@ -1524,6 +1545,11 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             else:
                 all_advantages = torch.stack([data['advantages'] for data in batch])
             extra_kwargs.update({'advantages': all_advantages})
+            # Pass golden injection markers to batch_encoded_inputs for fixed ratio application
+            if any(data.get('is_golden_injected', False) for data in batch):
+                extra_kwargs['is_golden_injected'] = torch.tensor(
+                    [data.get('is_golden_injected', False) for data in batch],
+                    dtype=torch.bool, device=self.accelerator.device)
             batch_encoded_inputs.update(extra_kwargs)
 
             with torch.no_grad():
@@ -1723,6 +1749,32 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         coef_2 = torch.clamp(coef_1, 1 - self.epsilon_low, 1 + self.epsilon_high)
         if self.args.delta is not None:
             coef_1 = torch.clamp(coef_1, max=self.args.delta)
+
+        # Apply fixed ratio for golden truth injected samples
+        if 'is_golden_injected' in inputs:
+            golden_injection_ratio = getattr(self.args, 'golden_injection_ratio', 1.05)
+            injected_mask = inputs['is_golden_injected']
+            if self.template.padding_free:
+                # For padding_free mode, expand sample-level mask to token-level
+                lengths = inputs['seq_lengths']
+                injected_token_mask = torch.repeat_interleave(injected_mask, lengths).unsqueeze(0)
+                # Ensure shape matches coef_2
+                if injected_token_mask.shape[1] != coef_2.shape[1]:
+                    # Adjust to match the actual sequence length in coef_2
+                    injected_token_mask = injected_token_mask[:, :coef_2.shape[1]]
+            else:
+                # For standard mode, expand to token dimension
+                injected_token_mask = injected_mask.unsqueeze(-1).expand_as(coef_2)
+            
+            # Apply fixed ratio only to injected samples' completion tokens
+            injection_mask = injected_token_mask & completion_mask
+            coef_2 = torch.where(injection_mask,
+                                 torch.full_like(coef_2, golden_injection_ratio),
+                                 coef_2)
+            # Also update coef_1 to match (for consistency in loss calculation)
+            coef_1 = torch.where(injection_mask,
+                                 torch.full_like(coef_1, golden_injection_ratio),
+                                 coef_1)
 
         if self.template.padding_free:
             advantages = advantages[-coef_1.shape[1]:]

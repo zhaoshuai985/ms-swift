@@ -337,6 +337,8 @@ class GRPOArgumentsMixin(VllmArguments):
 
     # dataset
     dataset_shuffle: Optional[bool] = True
+    enable_golden_truth_injection: bool = True
+    golden_injection_ratio: float = 1.05  # Fixed ratio for golden truth injected samples (default 1.05 for gentle updates)
 
 
 @dataclass

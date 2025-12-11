@@ -353,7 +353,50 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 else:
                     # Repeat all input columns (but "messages" and "completion") to match the number of generations
                     reward_kwargs.update(RowPreprocessor.rows_to_batched(inputs))
-                    output_reward_func = reward_func(completions, **reward_kwargs)
+                    
+                    # Extract fields from medpix (nested structure) to top level for reward functions
+                    # This handles cases where fields like image_caption, image_title, etc. are in medpix dict
+                    for inp in inputs:
+                        if 'medpix' in inp and isinstance(inp['medpix'], dict):
+                            for field in ['image_caption', 'image_title', 'image_plane', 'image_modality']:
+                                if field not in inp and field in inp['medpix']:
+                                    inp[field] = inp['medpix'][field]
+                    
+                    # Re-batch after extracting nested fields
+                    reward_kwargs.update(RowPreprocessor.rows_to_batched(inputs))
+                    
+                    # Check if reward_func requires a positional argument after completions
+                    # (e.g., answer, image_caption, solution, etc.)
+                    sig = inspect.signature(reward_func.__call__)
+                    params_list = list(sig.parameters.items())
+                    # Skip 'self' and 'completions', get the next positional parameter if exists
+                    positional_args = []
+                    positional_param_name = None
+                    
+                    # Look for the third parameter (after self and completions)
+                    if len(params_list) > 2:
+                        param_name, param = params_list[2]
+                        # Only process if it's not **kwargs (VAR_KEYWORD) or *args (VAR_POSITIONAL)
+                        if param.kind not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL):
+                            positional_param_name = param_name
+                            if positional_param_name in reward_kwargs:
+                                positional_args.append(reward_kwargs.pop(positional_param_name))
+                            else:
+                                # If parameter not found in reward_kwargs, return zero rewards as fallback
+                                import logging
+                                logging.warning(
+                                    f"Reward function {reward_func_name} expects parameter '{positional_param_name}' "
+                                    f"but it's not in the data. Returning zero rewards."
+                                )
+                                output_reward_func = [0.0] * len(completions)
+                                output_reward_func = [reward if reward is not None else torch.nan for reward in output_reward_func]
+                                rewards_per_func[:, i] = torch.tensor(output_reward_func, dtype=torch.float32, device=device)
+                                continue
+                    # Call with positional arguments if needed
+                    if positional_args:
+                        output_reward_func = reward_func(completions, positional_args[0], **reward_kwargs)
+                    else:
+                        output_reward_func = reward_func(completions, **reward_kwargs)
                 output_reward_func = [reward if reward is not None else torch.nan for reward in output_reward_func]
                 rewards_per_func[:, i] = torch.tensor(output_reward_func, dtype=torch.float32, device=device)
 
@@ -657,6 +700,27 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
         if not self.dynamic_num_samples:
             grouped_rewards = rewards.view(-1, self.num_generations)
             group_rewards_std = grouped_rewards.std(dim=1).repeat_interleave(self.num_generations)
+            
+            # Detection of AnswerMatchCosine all-zero groups for dynamic sampling
+            # When AnswerMatchCosine (1st reward function, index 0) is all zero in a group,
+            # we force std=0 to trigger resampling, treating it as a gradient-vanishing case
+            answer_rewards = rewards_per_func[:, 0]  # AnswerMatchCosine is typically the first reward
+            grouped_answer = answer_rewards.view(-1, self.num_generations)
+            grouped_answer_all_zero = (grouped_answer.sum(dim=1) == 0)  # All samples in group have 0 answer reward
+            
+            # If answer is all-zero in a group, force std=0 to trigger resampling
+            if grouped_answer_all_zero.any():
+                group_rewards_std = torch.where(
+                    grouped_answer_all_zero.repeat_interleave(self.num_generations),
+                    torch.zeros_like(group_rewards_std),
+                    group_rewards_std
+                )
+                # Log detection events
+                num_zero_groups = grouped_answer_all_zero.sum().item()
+                if num_zero_groups > 0:
+                    logger.debug(f'Dynamic sampling: Detected {num_zero_groups} group(s) with all-zero '
+                                f'AnswerMatchCosine reward. Forcing resampling.')
+            
             return group_rewards_std
         else:
             prompt_ids = gather_object([inp['prompt_id'] for inp in inputs])

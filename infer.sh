@@ -124,5 +124,9 @@
 # sleep 120s
 # CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --max_new_tokens 1024 --stream true --adapters /data/workspace/swift/output/v169-20251210-012330/checkpoint-4500
 # sleep 120s
-# CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --max_new_tokens 1024 --stream true --adapters /data/workspace/swift/output/v169-20251210-012330/checkpoint-4000
-# sleep 120s
+CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --max_new_tokens 1024 --stream true --adapters /data/workspace/swift/output/v174-20251210-194332/checkpoint-5000
+sleep 120s
+CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --max_new_tokens 1024 --stream true --adapters /data/workspace/swift/output/v174-20251210-194332/checkpoint-4500
+sleep 120s
+CUDA_VISIBLE_DEVICES=0 swift infer --val_dataset /data/datasets/vqarad/vqarad_test.jsonl --max_new_tokens 1024 --stream true --adapters /data/workspace/swift/output/v174-20251210-194332/checkpoint-4000
+sleep 120s
